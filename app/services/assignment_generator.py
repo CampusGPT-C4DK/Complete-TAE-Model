@@ -12,9 +12,8 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-# ---------- EXTRACT UNIT NUMBER FROM PDF NAME ----------
+# ---------- EXTRACT UNIT NUMBER ----------
 def extract_unit_number(name):
-
     if not name:
         return None
 
@@ -26,7 +25,7 @@ def extract_unit_number(name):
     return None
 
 
-# ---------- EXTRACT IMPORTANT TOPICS ----------
+# ---------- EXTRACT TOPICS ----------
 def extract_topics(text):
 
     kw = yake.KeywordExtractor(
@@ -41,7 +40,7 @@ def extract_topics(text):
     return topics[:6]
 
 
-# ---------- REMOVE SIMILAR QUESTIONS ----------
+# ---------- REMOVE SIMILAR ----------
 def remove_similar_questions(qs):
 
     if len(qs) <= 1:
@@ -68,20 +67,23 @@ def remove_similar_questions(qs):
         return qs
 
 
-# ---------- LLM QUESTION GENERATION ----------
+# ---------- LLM GENERATOR ----------
 def llm_generate(unit_text, topics, difficulty, count):
 
     if difficulty == "easy":
-        style = "short conceptual university exam questions"
+        style = "very short conceptual university exam questions"
         marks = 2
+        length_rule = "Each question MUST be between 12 to 16 words only."
 
-    elif difficulty == "hard":
-        style = "deep analytical long answer university exam questions"
-        marks = 10
+    elif difficulty == "medium":
+        style = "moderate descriptive university exam questions"
+        marks = 5
+        length_rule = "Each question MUST be between 20 to 28 words only."
 
     else:
-        style = "descriptive medium level university exam questions"
-        marks = 5
+        style = "deep analytical long answer university exam questions"
+        marks = 10
+        length_rule = "Questions can be long between 40 to 70 words."
 
     topic_string = ", ".join(topics)
 
@@ -93,13 +95,16 @@ Generate {count} DIFFERENT academic exam questions.
 Difficulty Level: {difficulty}
 Question Style: {style}
 
+IMPORTANT LENGTH RULE:
+{length_rule}
+
 Rules:
 - Questions must be complete
 - Avoid repetition
 - Avoid copying lines from notes
-- Cover the MOST important concepts
-- Use verbs like analyse, justify, compare, derive, evaluate
+- Cover MOST important concepts
 - Maintain university exam tone
+- Do NOT exceed the length rule
 
 Topics:
 {topic_string}
@@ -128,11 +133,8 @@ Return only numbered questions.
     return qs, marks
 
 
-# ---------- MAIN GENERATOR ----------
+# ---------- MAIN ----------
 def generate_questions(unit_notes_dict, difficulty="medium"):
-
-    if not isinstance(unit_notes_dict, dict):
-        return []
 
     if difficulty == "easy":
         TOTAL_Q = 4
@@ -145,7 +147,6 @@ def generate_questions(unit_notes_dict, difficulty="medium"):
 
     units = []
 
-    # ---------- BUILD UNIT STRUCTURE ----------
     for pdf_name, text in unit_notes_dict.items():
 
         unit_no = extract_unit_number(pdf_name)
@@ -160,7 +161,6 @@ def generate_questions(unit_notes_dict, difficulty="medium"):
 
         units.append((unit_no, cleaned))
 
-    # ---------- SORT BY ACTUAL UNIT NUMBER ----------
     units = sorted(units, key=lambda x: x[0])
 
     if not units:
@@ -170,7 +170,6 @@ def generate_questions(unit_notes_dict, difficulty="medium"):
 
     per_unit = max(1, TOTAL_Q // unit_count)
 
-    # ---------- GENERATE QUESTIONS ----------
     for unit_no, text in units:
 
         topics = extract_topics(text)

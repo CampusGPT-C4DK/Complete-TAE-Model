@@ -13,10 +13,8 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 
-# ⭐ Register Times New Roman Fonts
 pdfmetrics.registerFont(TTFont('Times', 'times.ttf'))
 pdfmetrics.registerFont(TTFont('Times-Bold', 'timesbd.ttf'))
-
 
 HEADER_HEIGHT = 120
 FOOTER_HEIGHT = 100
@@ -54,7 +52,7 @@ def generate_assignment_pdf(
 
     elements = []
 
-    # ⭐ DETAILS TABLE
+    # ---------- DETAILS TABLE ----------
     details_data = [
         [Paragraph("Assignment No", bold), assignment_no,
          Paragraph("Subject", bold), subject],
@@ -76,14 +74,10 @@ def generate_assignment_pdf(
     )
 
     details_table.setStyle(TableStyle([
-
         ('GRID', (0,0), (-1,-1), 1, colors.black),
-
         ('BACKGROUND', (0,0), (0,-1), colors.lavender),
         ('BACKGROUND', (2,0), (2,-1), colors.lavender),
-
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-
         ('LEFTPADDING',(0,0),(-1,-1),6),
         ('RIGHTPADDING',(0,0),(-1,-1),6),
         ('TOPPADDING',(0,0),(-1,-1),6),
@@ -91,10 +85,9 @@ def generate_assignment_pdf(
     ]))
 
     elements.append(details_table)
-
     elements.append(Table([[""]], colWidths=[PAGE_WIDTH], rowHeights=[20]))
 
-    # ⭐ QUESTIONS TABLE
+    # ---------- QUESTION TABLE ----------
     question_data = [[
         Paragraph("Q.No", bold),
         Paragraph("Questions", bold),
@@ -118,27 +111,24 @@ def generate_assignment_pdf(
             PAGE_WIDTH*0.62,
             PAGE_WIDTH*0.15,
             PAGE_WIDTH*0.15
-        ]
+        ],
+        repeatRows=1,
+        splitByRow=1
     )
 
     question_table.setStyle(TableStyle([
-
         ('GRID', (0,0), (-1,-1), 1, colors.black),
-
         ('BACKGROUND', (0,0), (-1,0), colors.lavender),
-
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
-
         ('LEFTPADDING',(0,0),(-1,-1),6),
         ('RIGHTPADDING',(0,0),(-1,-1),6),
         ('TOPPADDING',(0,0),(-1,-1),8),
         ('BOTTOMPADDING',(0,0),(-1,-1),8),
-
     ]))
 
     elements.append(question_table)
 
-    # ⭐ Header + Footer + Assignment Title
+    # ---------- HEADER FOOTER ----------
     def draw_header_footer(canvas, doc):
 
         page_width, page_height = letter
@@ -146,21 +136,14 @@ def generate_assignment_pdf(
         header = ImageReader("assets/header.png")
         footer = ImageReader("assets/footer.png")
 
-        canvas.drawImage(
-            header,
-            0,
-            page_height - HEADER_HEIGHT,
-            width=page_width,
-            height=HEADER_HEIGHT
-        )
+        canvas.drawImage(header, 0,
+                         page_height - HEADER_HEIGHT,
+                         width=page_width,
+                         height=HEADER_HEIGHT)
 
-        canvas.drawImage(
-            footer,
-            0,
-            0,
-            width=page_width,
-            height=FOOTER_HEIGHT
-        )
+        canvas.drawImage(footer, 0, 0,
+                         width=page_width,
+                         height=FOOTER_HEIGHT)
 
         y = page_height - HEADER_HEIGHT - 12
 
