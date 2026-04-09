@@ -1,27 +1,26 @@
-import os
-from pathlib import Path
+import logging
 from supabase import create_client
-from dotenv import load_dotenv
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------
-# FORCE LOAD .env FROM PROJECT ROOT
+# READ VARIABLES FROM PYDANTIC SETTINGS
 # ---------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent.parent
-ENV_FILE = BASE_DIR / ".env"
+SUPABASE_URL = settings.SUPABASE_URL
+SUPABASE_KEY = settings.SUPABASE_KEY  # Anon key
+SERVICE_ROLE_KEY = settings.SUPABASE_SERVICE_KEY  # Service role key
 
-load_dotenv(dotenv_path=ENV_FILE)
-
-# ---------------------------------------------------
-# READ VARIABLES
-# ---------------------------------------------------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-print("Loaded URL:", SUPABASE_URL)
-print("Loaded KEY:", SUPABASE_KEY)
+logger.info(f"Loading Supabase credentials...")
+logger.info(f"  URL: {SUPABASE_URL}")
+logger.info(f"  Anon key: {SUPABASE_KEY[:20]}...")
+if SERVICE_ROLE_KEY:
+    logger.info(f"  Service role key: ✓ Available")
+else:
+    logger.warning(f"  Service role key: ✗ Missing - some admin operations will fail")
 
 # ---------------------------------------------------
-# VALIDATE
+# VALIDATE (Config already validates in core/config.py)
 # ---------------------------------------------------
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError(
@@ -32,6 +31,17 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     )
 
 # ---------------------------------------------------
-# CREATE CLIENT
+# CREATE CLIENTS
 # ---------------------------------------------------
+# Anon key client (for regular users)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+logger.info("✅ Supabase anon client initialized")
+
+# Service role client (for admin operations, bypasses RLS)
+# Only create if SERVICE_ROLE_KEY is available
+supabase_admin = None
+if SERVICE_ROLE_KEY:
+    supabase_admin = create_client(SUPABASE_URL, SERVICE_ROLE_KEY)
+    logger.info("✅ Supabase service role client initialized")
+else:
+    logger.warning("⚠️  SERVICE_ROLE_KEY not configured. Some admin operations may fail.")

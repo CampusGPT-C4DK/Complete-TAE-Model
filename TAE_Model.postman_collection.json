@@ -1,0 +1,890 @@
+{
+  "info": {
+    "_postman_id": "tae-model-collection",
+    "name": "TAE Model API",
+    "description": "Complete API collection for TAE Model (Teacher Assignment Evaluation).\n\nBase URL: {{base_url}} (default: http://localhost:8000)\n\nAuthentication:\n- POST /teacher/register - Faculty account creation\n- POST /teacher/login - Faculty authentication\n- POST /student/register - Student account creation\n- POST /student/login - Student authentication\n- All protected routes require JWT token in Authorization header\n- Set {{faculty_token}} from faculty login/register\n- Set {{student_token}} from student login/register\n\nHow to get started:\n1. Call POST /teacher/register or POST /teacher/login for faculty access\n2. Call POST /student/register or POST /student/login for student access\n3. Copy the access_token from response\n4. Tokens auto-save to {{faculty_token}} or {{student_token}}\n5. Use appropriate token for the endpoint",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "🏥 Health",
+      "description": "Health check endpoints. No authentication required.",
+      "item": [
+        {
+          "name": "App Health Check",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/",
+              "host": ["{{base_url}}"],
+              "path": [""]
+            },
+            "description": "Basic health check. Returns app status and 'EduGenAI Running' message."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/" }
+              },
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"message\": \"EduGenAI Running 🚀\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "👨‍🏫 Faculty / Teacher",
+      "description": "Teacher/Faculty endpoints for managing assignments, students, and evaluations.",
+      "item": [
+        {
+          "name": "🔐 Teacher Auth",
+          "description": "Faculty authentication endpoints.",
+          "item": [
+            {
+              "name": "1️⃣ Register (Faculty)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201 || pm.response.code === 200) {",
+                      "    try {",
+                      "        const json = pm.response.json();",
+                      "        if (json.access_token) {",
+                      "            pm.environment.set('faculty_token', json.access_token);",
+                      "            console.log('✅ faculty_token auto-saved from register');",
+                      "            console.log('Faculty:', json.email || json.user.email, '(Role:', json.role || json.user.role + ')');",
+                      "        }",
+                      "    } catch(e) {",
+                      "        console.log('Token not found in response');",
+                      "    }",
+                      "} else {",
+                      "    console.log('Registration failed:', pm.response.code);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+                ],
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "email", "value": "faculty@example.com", "type": "text" },
+                    { "key": "password", "value": "SecurePassword123!", "type": "text" },
+                    { "key": "full_name", "value": "Dr. Jane Smith", "type": "text" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/teacher/register",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "register"]
+                },
+                "description": "Register a new faculty/teacher account.\n\nForm Data:\n- email (required): Faculty email address\n- password (required): Strong password\n- full_name (required): Full name of faculty\n\nResponse (200/201):\n- access_token: JWT for authenticating future requests\n- user_id: UUID of the newly created faculty\n- email: Faculty email\n- role: 'faculty'\n\nThe access_token is auto-saved to {{faculty_token}} by the test script."
+              },
+              "response": [
+                {
+                  "name": "200/201 Created - Success",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/register" }
+                  },
+                  "status": "Created",
+                  "code": 201,
+                  "body": "{\n  \"status\": \"success\",\n  \"user_id\": \"550e8400-e29b-41d4-a716-446655440010\",\n  \"email\": \"faculty@example.com\",\n  \"full_name\": \"Dr. Jane Smith\",\n  \"role\": \"faculty\",\n  \"access_token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n  \"token_type\": \"bearer\",\n  \"expires_in\": 3600\n}"
+                },
+                {
+                  "name": "400 Bad Request - Already Exists",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/register" }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "body": "{\n  \"detail\": \"User already registered\"\n}"
+                }
+              ]
+            },
+            {
+              "name": "2️⃣ Login (Faculty)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 200) {",
+                      "    try {",
+                      "        const json = pm.response.json();",
+                      "        if (json.access_token) {",
+                      "            pm.environment.set('faculty_token', json.access_token);",
+                      "            console.log('✅ faculty_token auto-saved from login');",
+                      "            console.log('Logged in as:', json.email || json.user.email, '(Role:', json.role || json.user.role + ')');",
+                      "        }",
+                      "    } catch(e) {",
+                      "        console.log('Token not found in response');",
+                      "    }",
+                      "} else {",
+                      "    console.log('Login failed:', pm.response.code);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+                ],
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "email", "value": "faculty@example.com", "type": "text" },
+                    { "key": "password", "value": "SecurePassword123!", "type": "text" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/teacher/login",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "login"]
+                },
+                "description": "Authenticate a faculty member with email and password.\n\nForm Data:\n- email (required): Faculty email\n- password (required): Faculty password\n\nResponse (200 OK):\n- access_token: JWT for authenticating future requests (valid 1 hour)\n- user_id: Faculty UUID\n- email: Faculty email\n- role: 'faculty'\n- token_type: 'bearer'\n- expires_in: Seconds until expiration\n\nThe access_token is auto-saved to {{faculty_token}} by the test script."
+              },
+              "response": [
+                {
+                  "name": "200 OK - Login Success",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/login" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"user_id\": \"550e8400-e29b-41d4-a716-446655440010\",\n  \"email\": \"faculty@example.com\",\n  \"full_name\": \"Dr. Jane Smith\",\n  \"role\": \"faculty\",\n  \"access_token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n  \"token_type\": \"bearer\",\n  \"expires_in\": 3600\n}"
+                },
+                {
+                  "name": "401 Unauthorized - Invalid Credentials",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/login" }
+                  },
+                  "status": "Unauthorized",
+                  "code": 401,
+                  "body": "{\n  \"detail\": \"Invalid email or password\"\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "📝 Assignments",
+          "description": "Create and manage assignments.",
+          "item": [
+            {
+              "name": "Create Assignment",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+                  ]
+                },
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+                ],
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "subject", "value": "Mathematics", "type": "text" },
+                    { "key": "topic", "value": "Algebra Basics", "type": "text" },
+                    { "key": "question_type", "value": "multiple_choice", "type": "text" },
+                    { "key": "num_questions", "value": "5", "type": "text" },
+                    { "key": "difficulty", "value": "medium", "type": "text" },
+                    { "key": "assignment_number", "value": "1", "type": "text" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/teacher/create-assignment",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "create-assignment"]
+                },
+                "description": "Create a new assignment with auto-generated questions.\n\nRequirements:\n- Bearer token from faculty login/register\n\nForm Data:\n- subject (required): Course subject (Math, Science, Literature, etc.)\n- topic (required): Specific topic within the subject\n- question_type (required): 'multiple_choice', 'short_answer', 'essay'\n- num_questions (required): Number of questions (1-20)\n- difficulty (optional): 'easy', 'medium', 'hard' (default: medium)\n- assignment_number (optional): Assignment number/identifier\n\nResponse (200 OK):\n- assignment_id: UUID of created assignment\n- questions: Array of auto-generated questions\n- total_questions: Number of questions created\n- status: 'success'\n\nNote: Questions are generated using AI based on subject and topic."
+              },
+              "response": [
+                {
+                  "name": "200 OK - Assignment Created",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/create-assignment" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"assignment_id\": \"550e8400-e29b-41d4-a716-446655440020\",\n  \"total_questions\": 5,\n  \"questions\": [\n    {\n      \"id\": 1,\n      \"question\": \"What is 2x + 3 = 7?\",\n      \"options\": [\"x = 1\", \"x = 2\", \"x = 3\", \"x = 4\"],\n      \"correct_answer\": \"x = 2\",\n      \"marks\": 5\n    }\n  ]\n}"
+                }
+              ]
+            },
+            {
+              "name": "Get All Assignments",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/teacher/assignments",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "assignments"]
+                },
+                "description": "Retrieve all assignments created by the current faculty member.\n\nRequirements:\n- Bearer token from faculty login/register\n\nResponse (200 OK):\n- assignments: Array of assignment objects with IDs, topics, creation dates, etc.\n- total: Total number of assignments"
+              },
+              "response": [
+                {
+                  "name": "200 OK - List Retrieved",
+                  "originalRequest": {
+                    "method": "GET",
+                    "url": { "raw": "{{base_url}}/teacher/assignments" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"total\": 2,\n  \"assignments\": [\n    {\n      \"id\": \"550e8400-e29b-41d4-a716-446655440020\",\n      \"subject\": \"Mathematics\",\n      \"topic\": \"Algebra Basics\",\n      \"num_questions\": 5,\n      \"created_at\": \"2026-03-16T10:00:00Z\"\n    }\n  ]\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "� Generate from Documents",
+          "description": "Upload teacher notes and automatically generate assignments.",
+          "item": [
+            {
+              "name": "Upload Notes & Generate Assignment",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 200) {",
+                      "    try {",
+                      "        const json = pm.response.json();",
+                      "        if (json.assignment_id) {",
+                      "            pm.environment.set('assignment_id', json.assignment_id);",
+                      "            console.log('✅ assignment_id auto-saved from upload-notes');",
+                      "            console.log('Assignment:', json.assignment_id, '| PDF:', json.pdf_url);",
+                      "        }",
+                      "    } catch(e) {",
+                      "        console.log('Response parsing failed');",
+                      "    }",
+                      "} else {",
+                      "    console.log('Upload failed:', pm.response.code);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+                  ]
+                },
+                "method": "POST",
+                "header": [],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    { "key": "files", "value": "lecture_notes.pdf", "type": "file" },
+                    { "key": "difficulty", "value": "medium", "type": "text" },
+                    { "key": "assignment_no", "value": "1", "type": "text" },
+                    { "key": "subject", "value": "Mathematics", "type": "text" },
+                    { "key": "branch", "value": "Computer Science", "type": "text" },
+                    { "key": "semester", "value": "4", "type": "text" },
+                    { "key": "faculty", "value": "Dr. Jane Smith", "type": "text" },
+                    { "key": "given_date", "value": "09-04-2026", "type": "text" },
+                    { "key": "submission_date", "value": "16-04-2026", "type": "text" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/teacher/upload-notes",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "upload-notes"]
+                },
+                "description": "Upload teacher notes (PDF), automatically extract content, generate assignment questions, and store in Supabase.\n\nRequirements:\n- Bearer token from faculty login/register\n- Multipart form data with PDF file(s)\n\nForm Data:\n- files (required): PDF file(s) with teacher notes/lecture materials\n- difficulty (required): 'easy', 'medium', or 'hard'\n- assignment_no (required): Assignment number (e.g., '1', '2', '3')\n- subject (required): Course subject (e.g., 'Mathematics', 'Physics')\n- branch (required): Course branch/specialization (e.g., 'Computer Science', 'AI')\n- semester (required): Semester number (e.g., '4', '6')\n- faculty (required): Faculty/instructor name\n- given_date (required): Date assignment given (format: DD-MM-YYYY)\n- submission_date (required): Due date (format: DD-MM-YYYY)\n\nResponse (200 OK):\n- status: 'success'\n- assignment_id: UUID of generated assignment\n- pdf_url: Public URL to generated assignment PDF\n- storage_bucket: Supabase bucket name\n- storage_path: Path in storage\n- message: Confirmation message\n\nProcess:\n1. Extract text from uploaded PDF(s)\n2. Analyze content for topics using NLP\n3. Generate assignment questions matching difficulty\n4. Create assignment PDF with questions\n5. Store metadata and files in Supabase\n\nNote: The assignment_id is auto-saved to {{assignment_id}} variable for subsequent requests."
+              },
+              "response": [
+                {
+                  "name": "200 OK - Assignment Generated",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/upload-notes" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"message\": \"Assignment created and stored successfully\",\n  \"assignment_id\": \"550e8400-e29b-41d4-a716-446655440060\",\n  \"pdf_url\": \"https://storage.supabase.co/files/assignments/...\",\n  \"storage_bucket\": \"assignments\",\n  \"storage_path\": \"user_id/subject/semester-4/assignment-1/assignment.pdf\"\n}"
+                },
+                {
+                  "name": "403 Forbidden - Not Authenticated",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/upload-notes" }
+                  },
+                  "status": "Forbidden",
+                  "code": 403,
+                  "body": "{\n  \"detail\": \"Not authenticated\"\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "�📊 Upload & Evaluate",
+          "description": "Upload student responses and evaluate them.",
+          "item": [
+            {
+              "name": "Upload Student Responses (PDF)",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+                  ]
+                },
+                "method": "POST",
+                "header": [],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    { "key": "assignment_id", "value": "550e8400-e29b-41d4-a716-446655440020", "type": "text" },
+                    { "key": "student_name", "value": "John Doe", "type": "text" },
+                    { "key": "student_email", "value": "student@example.com", "type": "text" },
+                    { "key": "pdf_file", "value": "student_responses.pdf", "type": "file" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/teacher/upload-responses",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "upload-responses"]
+                },
+                "description": "Upload student response PDF for evaluation.\n\nRequirements:\n- Bearer token from faculty login/register\n- Multipart form data with PDF file\n\nForm Data:\n- assignment_id (required): UUID of the assignment\n- student_name (required): Name of the student\n- student_email (required): Email of the student\n- pdf_file (required): PDF file with student responses\n\nResponse (200 OK):\n- status: 'success'\n- submission_id: UUID of the submission\n- bytes_uploaded: File size\n- message: Upload confirmation"
+              },
+              "response": [
+                {
+                  "name": "200 OK - File Uploaded",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/upload-responses" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"submission_id\": \"550e8400-e29b-41d4-a716-446655440030\",\n  \"student_name\": \"John Doe\",\n  \"bytes_uploaded\": 25000,\n  \"message\": \"PDF uploaded successfully and queued for evaluation\"\n}"
+                }
+              ]
+            },
+            {
+              "name": "Evaluate Student Responses",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+                  ]
+                },
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+                ],
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "submission_id", "value": "550e8400-e29b-41d4-a716-446655440030", "type": "text" },
+                    { "key": "assignment_id", "value": "550e8400-e29b-41d4-a716-446655440020", "type": "text" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/teacher/evaluate",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "evaluate"]
+                },
+                "description": "Evaluate student responses and generate comprehensive feedback.\n\nRequirements:\n- Bearer token from faculty login/register\n\nForm Data:\n- submission_id (required): UUID from upload-responses\n- assignment_id (required): UUID of the assignment\n\nResponse (200 OK):\n- evaluation_id: UUID of evaluation\n- score: Total score (0-100)\n- feedback: Detailed feedback for each question\n- summary: Overall evaluation summary\n- suggestions: Improvement suggestions"
+              },
+              "response": [
+                {
+                  "name": "200 OK - Evaluation Complete",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/teacher/evaluate" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"evaluation_id\": \"550e8400-e29b-41d4-a716-446655440040\",\n  \"student_name\": \"John Doe\",\n  \"score\": 85,\n  \"max_score\": 100,\n  \"feedback\": [\n    {\n      \"question_number\": 1,\n      \"feedback\": \"Correct! Great understanding of algebra.\",\n      \"marks_awarded\": 5\n    }\n  ],\n  \"summary\": \"Overall excellent performance with minor areas for improvement.\",\n  \"suggestions\": [\"Practice more complex equations\", \"Review fractions\"]\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "📈 Generate Reports",
+          "description": "Generate performance and analysis reports.",
+          "item": [
+            {
+              "name": "Generate Class Report",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/teacher/reports?assignment_id=550e8400-e29b-41d4-a716-446655440020",
+                  "host": ["{{base_url}}"],
+                  "path": ["teacher", "reports"],
+                  "query": [
+                    { "key": "assignment_id", "value": "550e8400-e29b-41d4-a716-446655440020" }
+                  ]
+                },
+                "description": "Generate a comprehensive class report for an assignment.\n\nRequirements:\n- Bearer token from faculty login/register\n\nQuery Parameters:\n- assignment_id (required): UUID of the assignment\n\nResponse (200 OK):\n- report_id: UUID of the report\n- assignment_info: Assignment details\n- class_statistics: Average score, standard deviation, pass rate, etc.\n- student_scores: Individual student performance\n- performance_analysis: Trend analysis and insights"
+              },
+              "response": [
+                {
+                  "name": "200 OK - Report Generated",
+                  "originalRequest": {
+                    "method": "GET",
+                    "url": { "raw": "{{base_url}}/teacher/reports" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"report_id\": \"550e8400-e29b-41d4-a716-446655440050\",\n  \"class_statistics\": {\n    \"total_students\": 30,\n    \"submissions\": 28,\n    \"average_score\": 78.5,\n    \"highest_score\": 95,\n    \"lowest_score\": 60,\n    \"pass_rate\": 90\n  },\n  \"student_scores\": [\n    {\n      \"name\": \"John Doe\",\n      \"score\": 85,\n      \"submission_date\": \"2026-03-16T10:30:00Z\"\n    }\n  ]\n}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "👨‍🎓 Student",
+      "description": "Student endpoints for viewing assignments and receiving feedback.",
+      "item": [
+        {
+          "name": "🔐 Student Auth",
+          "description": "Student authentication endpoints.",
+          "item": [
+            {
+              "name": "1️⃣ Register (Student)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201 || pm.response.code === 200) {",
+                      "    try {",
+                      "        const json = pm.response.json();",
+                      "        if (json.access_token) {",
+                      "            pm.environment.set('student_token', json.access_token);",
+                      "            console.log('✅ student_token auto-saved from register');",
+                      "            console.log('Student:', json.email || json.user.email, '(Role:', json.role || json.user.role + ')');",
+                      "        }",
+                      "    } catch(e) {",
+                      "        console.log('Token not found in response');",
+                      "    }",
+                      "} else {",
+                      "    console.log('Registration failed:', pm.response.code);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+                ],
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "email", "value": "student@example.com", "type": "text" },
+                    { "key": "password", "value": "StudentPass123!", "type": "text" },
+                    { "key": "full_name", "value": "John Student", "type": "text" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/student/register",
+                  "host": ["{{base_url}}"],
+                  "path": ["student", "register"]
+                },
+                "description": "Register a new student account.\n\nForm Data:\n- email (required): Student email address\n- password (required): Strong password\n- full_name (required): Full name of student\n\nResponse (200/201):\n- access_token: JWT for authenticating future requests\n- user_id: UUID of the newly created student\n- email: Student email\n- role: 'student'\n\nThe access_token is auto-saved to {{student_token}} by the test script."
+              },
+              "response": [
+                {
+                  "name": "200/201 Created - Success",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/student/register" }
+                  },
+                  "status": "Created",
+                  "code": 201,
+                  "body": "{\n  \"status\": \"success\",\n  \"user_id\": \"550e8400-e29b-41d4-a716-446655440100\",\n  \"email\": \"student@example.com\",\n  \"full_name\": \"John Student\",\n  \"role\": \"student\",\n  \"access_token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n  \"token_type\": \"bearer\",\n  \"expires_in\": 3600\n}"
+                }
+              ]
+            },
+            {
+              "name": "2️⃣ Login (Student)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 200) {",
+                      "    try {",
+                      "        const json = pm.response.json();",
+                      "        if (json.access_token) {",
+                      "            pm.environment.set('student_token', json.access_token);",
+                      "            console.log('✅ student_token auto-saved from login');",
+                      "            console.log('Logged in as:', json.email || json.user.email, '(Role:', json.role || json.user.role + ')');",
+                      "        }",
+                      "    } catch(e) {",
+                      "        console.log('Token not found in response');",
+                      "    }",
+                      "} else {",
+                      "    console.log('Login failed:', pm.response.code);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+                ],
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "email", "value": "student@example.com", "type": "text" },
+                    { "key": "password", "value": "StudentPass123!", "type": "text" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/student/login",
+                  "host": ["{{base_url}}"],
+                  "path": ["student", "login"]
+                },
+                "description": "Authenticate a student with email and password.\n\nForm Data:\n- email (required): Student email\n- password (required): Student password\n\nResponse (200 OK):\n- access_token: JWT for authenticating future requests (valid 1 hour)\n- user_id: Student UUID\n- email: Student email\n- role: 'student'\n- token_type: 'bearer'\n- expires_in: Seconds until expiration\n\nThe access_token is auto-saved to {{student_token}} by the test script."
+              },
+              "response": [
+                {
+                  "name": "200 OK - Login Success",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/student/login" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"user_id\": \"550e8400-e29b-41d4-a716-446655440100\",\n  \"email\": \"student@example.com\",\n  \"full_name\": \"John Student\",\n  \"role\": \"student\",\n  \"access_token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n  \"token_type\": \"bearer\",\n  \"expires_in\": 3600\n}"
+                },
+                {
+                  "name": "401 Unauthorized - Invalid Credentials",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/student/login" }
+                  },
+                  "status": "Unauthorized",
+                  "code": 401,
+                  "body": "{\n  \"detail\": \"Invalid email or password\"\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "📚 View Assignments",
+          "description": "Students can view available assignments.",
+          "item": [
+            {
+              "name": "Get All Available Assignments",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{student_token}}", "type": "string" }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/student/assignments",
+                  "host": ["{{base_url}}"],
+                  "path": ["student", "assignments"]
+                },
+                "description": "Retrieve all assignments available to the student.\n\nRequirements:\n- Bearer token from student login/register\n\nResponse (200 OK):\n- assignments: Array of assignment objects\n- total: Total number of available assignments\n- Each assignment includes: id, subject, topic, num_questions, created_by, deadline"
+              },
+              "response": [
+                {
+                  "name": "200 OK - List Retrieved",
+                  "originalRequest": {
+                    "method": "GET",
+                    "url": { "raw": "{{base_url}}/student/assignments" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"total\": 5,\n  \"assignments\": [\n    {\n      \"id\": \"550e8400-e29b-41d4-a716-446655440020\",\n      \"subject\": \"Mathematics\",\n      \"topic\": \"Algebra Basics\",\n      \"num_questions\": 5,\n      \"created_by\": \"Dr. Jane Smith\",\n      \"created_at\": \"2026-03-16T10:00:00Z\",\n      \"deadline\": \"2026-03-23T23:59:59Z\"\n    }\n  ]\n}"
+                }
+              ]
+            },
+            {
+              "name": "Get Assignment Details",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{student_token}}", "type": "string" }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/student/assignment/550e8400-e29b-41d4-a716-446655440020",
+                  "host": ["{{base_url}}"],
+                  "path": ["student", "assignment", "550e8400-e29b-41d4-a716-446655440020"]
+                },
+                "description": "Retrieve detailed information about a specific assignment including all questions.\n\nRequirements:\n- Bearer token from student login/register\n- assignment_id as URL parameter\n\nResponse (200 OK):\n- assignment details with all questions\n- question options (for multiple choice)\n- instructions and guidelines\n- deadline and submission status"
+              },
+              "response": [
+                {
+                  "name": "200 OK - Details Retrieved",
+                  "originalRequest": {
+                    "method": "GET",
+                    "url": { "raw": "{{base_url}}/student/assignment/550e8400-e29b-41d4-a716-446655440020" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"id\": \"550e8400-e29b-41d4-a716-446655440020\",\n  \"subject\": \"Mathematics\",\n  \"topic\": \"Algebra Basics\",\n  \"questions\": [\n    {\n      \"id\": 1,\n      \"question\": \"What is 2x + 3 = 7?\",\n      \"type\": \"multiple_choice\",\n      \"options\": [\"x = 1\", \"x = 2\", \"x = 3\", \"x = 4\"]\n    }\n  ]\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "📥 Submit & View Results",
+          "description": "Submit responses and view evaluation results.",
+          "item": [
+            {
+              "name": "Submit Assignment Response (PDF)",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{student_token}}", "type": "string" }
+                  ]
+                },
+                "method": "POST",
+                "header": [],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    { "key": "assignment_id", "value": "550e8400-e29b-41d4-a716-446655440020", "type": "text" },
+                    { "key": "response_file", "value": "my_responses.pdf", "type": "file" }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/student/submit-assignment",
+                  "host": ["{{base_url}}"],
+                  "path": ["student", "submit-assignment"]
+                },
+                "description": "Submit assignment responses as a PDF file.\n\nRequirements:\n- Bearer token from student login/register\n- Multipart form data with PDF file\n\nForm Data:\n- assignment_id (required): UUID of the assignment\n- response_file (required): PDF file with student's responses\n\nResponse (200 OK):\n- submission_id: UUID of the submission\n- status: 'submitted'\n- submitted_at: Timestamp\n- message: Confirmation message"
+              },
+              "response": [
+                {
+                  "name": "200 OK - Submitted",
+                  "originalRequest": {
+                    "method": "POST",
+                    "url": { "raw": "{{base_url}}/student/submit-assignment" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"submission_id\": \"550e8400-e29b-41d4-a716-446655440030\",\n  \"assignment_id\": \"550e8400-e29b-41d4-a716-446655440020\",\n  \"submitted_at\": \"2026-03-16T14:30:00Z\",\n  \"message\": \"Assignment submitted successfully. Waiting for evaluation.\"\n}"
+                }
+              ]
+            },
+            {
+              "name": "Get My Submissions",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{student_token}}", "type": "string" }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/student/my-submissions",
+                  "host": ["{{base_url}}"],
+                  "path": ["student", "my-submissions"]
+                },
+                "description": "Retrieve all submissions made by the current student.\n\nRequirements:\n- Bearer token from student login/register\n\nResponse (200 OK):\n- submissions: Array with submission details\n- Each submission includes: id, assignment_id, status, submitted_at, score (if evaluated)"
+              },
+              "response": [
+                {
+                  "name": "200 OK - Submissions List",
+                  "originalRequest": {
+                    "method": "GET",
+                    "url": { "raw": "{{base_url}}/student/my-submissions" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"total\": 2,\n  \"submissions\": [\n    {\n      \"id\": \"550e8400-e29b-41d4-a716-446655440030\",\n      \"assignment_id\": \"550e8400-e29b-41d4-a716-446655440020\",\n      \"assignment_name\": \"Algebra Basics\",\n      \"status\": \"evaluated\",\n      \"score\": 85,\n      \"submitted_at\": \"2026-03-16T14:30:00Z\",\n      \"evaluated_at\": \"2026-03-16T15:00:00Z\"\n    }\n  ]\n}"
+                }
+              ]
+            },
+            {
+              "name": "Get Feedback for Submission",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    { "key": "token", "value": "{{student_token}}", "type": "string" }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/student/feedback/550e8400-e29b-41d4-a716-446655440030",
+                  "host": ["{{base_url}}"],
+                  "path": ["student", "feedback", "550e8400-e29b-41d4-a716-446655440030"]
+                },
+                "description": "Retrieve detailed feedback for a submitted assignment.\n\nRequirements:\n- Bearer token from student login/register\n- submission_id as URL parameter\n\nResponse (200 OK):\n- evaluation_details: Complete feedback with scores\n- feedback_per_question: Individual question feedback\n- overall_summary: General performance summary\n- suggestions_for_improvement: Personalized suggestions"
+              },
+              "response": [
+                {
+                  "name": "200 OK - Feedback Retrieved",
+                  "originalRequest": {
+                    "method": "GET",
+                    "url": { "raw": "{{base_url}}/student/feedback/550e8400-e29b-41d4-a716-446655440030" }
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "body": "{\n  \"status\": \"success\",\n  \"submission_id\": \"550e8400-e29b-41d4-a716-446655440030\",\n  \"score\": 85,\n  \"max_score\": 100,\n  \"feedback\": [\n    {\n      \"question_number\": 1,\n      \"your_answer\": \"x = 2\",\n      \"evaluation\": \"Correct! Great understanding.\",\n      \"marks_awarded\": 5\n    }\n  ],\n  \"overall_summary\": \"Excellent work overall. You showed strong understanding of algebraic concepts.\",\n  \"suggestions\": [\"Focus on word problems\", \"Practice quadratic equations\"]\n}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "📊 Dashboard & Reports",
+      "description": "View analytics and comprehensive reports.",
+      "item": [
+        {
+          "name": "Get Dashboard Statistics",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/dashboard/stats",
+              "host": ["{{base_url}}"],
+              "path": ["dashboard", "stats"]
+            },
+            "description": "Retrieve dashboard statistics and key metrics.\n\nRequirements:\n- Bearer token from faculty login/register\n\nResponse (200 OK):\n- total_assignments: Number of assignments created\n- total_students: Number of enrolled students\n- average_score: Class average score\n- pending_evaluations: Count of submissions waiting evaluation\n- completion_rate: Assignment completion percentage"
+          },
+          "response": [
+            {
+              "name": "200 OK - Stats Retrieved",
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/dashboard/stats" }
+              },
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"success\",\n  \"total_assignments\": 10,\n  \"total_students\": 30,\n  \"average_score\": 78.5,\n  \"pending_evaluations\": 5,\n  \"completion_rate\": 93.3\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🧪 Evaluation Endpoints",
+      "description": "Test evaluation-specific endpoints.",
+      "item": [
+        {
+          "name": "Auto-Evaluate Assignment",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                { "key": "token", "value": "{{faculty_token}}", "type": "string" }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "submission_id", "value": "550e8400-e29b-41d4-a716-446655440030", "type": "text" },
+                { "key": "assignment_id", "value": "550e8400-e29b-41d4-a716-446655440020", "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/evaluation/auto-evaluate",
+              "host": ["{{base_url}}"],
+              "path": ["evaluation", "auto-evaluate"]
+            },
+            "description": "Automatically evaluate a student submission using AI.\n\nRequirements:\n- Bearer token with faculty permissions\n\nForm Data:\n- submission_id (required): UUID of the submission\n- assignment_id (required): UUID of the assignment\n\nResponse (200 OK):\n- evaluation_id: UUID of the evaluation\n- score: Calculated score (0-100)\n- detailed_feedback: AI-generated feedback"
+          },
+          "response": [
+            {
+              "name": "200 OK - Evaluated",
+              "originalRequest": {
+                "method": "POST",
+                "url": { "raw": "{{base_url}}/evaluation/auto-evaluate" }
+              },
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"success\",\n  \"evaluation_id\": \"550e8400-e29b-41d4-a716-446655440040\",\n  \"score\": 85,\n  \"detailed_feedback\": \"Strong understanding of core concepts with room for improvement in application.\"\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,9 +1,10 @@
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import uuid
+import os
 
 def generate_report(student_name, score, feedback):
-
+    os.makedirs("reports", exist_ok=True)
     filename = f"reports/report_{uuid.uuid4()}.pdf"
 
     c = canvas.Canvas(filename, pagesize=letter)

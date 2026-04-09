@@ -1,5 +1,5 @@
-import ollama
 import re
+from app.services.model_config import call_llm
 
 
 def difficulty_logic(level):
@@ -14,7 +14,10 @@ def difficulty_logic(level):
 
 
 def ask_llm(unit_text, difficulty, count):
-
+    """
+    Generate questions using the configured LLM model (dynamic).
+    Automatically routes to Ollama (phi3:mini) or Gemini based on .env config.
+    """
     instruction, marks = difficulty_logic(difficulty)
 
     prompt = f"""
@@ -35,12 +38,12 @@ Notes:
 Return only numbered questions.
 """
 
-    response = ollama.chat(
-        model="phi3",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    raw = response["message"]["content"]
+    try:
+        # Use dynamic model configuration
+        raw = call_llm(prompt, temperature=0.7)
+    except Exception as e:
+        print(f"❌ Error calling LLM: {e}")
+        return [], marks
 
     questions = []
 
