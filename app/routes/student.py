@@ -189,13 +189,17 @@ async def submit_assignment(
 
         logger.info(f"   ✓ File saved temporarily: {local_file_path}")
 
-        # Extract text from submission
+        # Extract text from submission (optional - don't fail if extraction fails)
         logger.info("   Extracting text from submission...")
-        submission_text = extract_text(local_file_path)
-
-        if not submission_text:
-            logger.error("   Text extraction failed")
-            return {"status": "error", "message": "Failed to extract text from PDF"}
+        submission_text = ""
+        try:
+            submission_text = extract_text(local_file_path)
+            if not submission_text:
+                logger.warning("   ⚠️ PDF text extraction returned empty - proceeding without text")
+                submission_text = "[PDF content could not be extracted]"
+        except Exception as e:
+            logger.warning(f"   ⚠️ PDF text extraction failed: {str(e)} - proceeding without text")
+            submission_text = "[PDF content could not be extracted]"
 
         # Get assignment data
         logger.info("   Fetching assignment details...")
@@ -226,17 +230,21 @@ async def submit_assignment(
 
         # Upload to Supabase Storage
         logger.info("   Uploading to Supabase Storage...")
-        storage_result = StorageService.upload_file_to_submissions(
-            file_path=local_file_path,
-            assignment_id=assignment_id,
-            student_id=student_id,
-            file_name=file.filename
-        )
+        try:
+            storage_result = StorageService.upload_file_to_submissions(
+                file_path=local_file_path,
+                assignment_id=assignment_id,
+                student_id=student_id,
+                file_name=file.filename
+            )
+            logger.info(f"   ✓ File stored: {storage_result['file_path']}")
+        except Exception as storage_error:
+            logger.error(f"   ❌ Storage upload failed: {str(storage_error)}", exc_info=True)
+            return {"status": "error", "message": f"File upload failed: {str(storage_error)}"}
 
-        logger.info(f"   ✓ File stored: {storage_result['file_path']}")
-
-        # Check if submission already exists
-        existing_submission = supabase.table("submissions") \
+        # Check if submission already exists (use admin client to bypass RLS for read)
+        db_client = supabase_admin if supabase_admin else supabase
+        existing_submission = db_client.table("submissions") \
             .select("id") \
             .eq("assignment_id", assignment_id) \
             .eq("student_id", student_id) \
@@ -249,41 +257,51 @@ async def submit_assignment(
             logger.info("   Updating existing submission...")
             submission_id = existing_submission.data[0]["id"]
             
-            db_client = supabase_admin if supabase_admin else supabase
-            result = db_client.table("submissions").update({
-                "submitted_file_path": storage_result["file_path"],
-                "submitted_file_url": storage_result["storage_url"],
-                "submission_text": submission_text[:5000],
-                "submitted_at": datetime.now().isoformat(),
-                "is_late": is_late,
-                "days_late": days_late,
-                "status": "late" if is_late else "submitted",
-                "updated_at": datetime.now().isoformat()
-            }).eq("id", submission_id).execute()
-            
-            logger.info(f"   ✓ Submission updated: {submission_id}")
+            try:
+                # Use admin client for update (student is already authenticated)
+                db_client = supabase_admin if supabase_admin else supabase
+                result = db_client.table("submissions").update({
+                    "submitted_file_path": storage_result["file_path"],
+                    "submitted_file_url": storage_result["storage_url"],
+                    "submission_text": submission_text[:5000],
+                    "submitted_at": datetime.now().isoformat(),
+                    "is_late": is_late,
+                    "days_late": days_late,
+                    "status": "late" if is_late else "submitted",
+                    "updated_at": datetime.now().isoformat()
+                }).eq("id", submission_id).execute()
+                
+                logger.info(f"   ✓ Submission updated: {submission_id}")
+            except Exception as db_error:
+                logger.error(f"   ❌ Database update failed: {str(db_error)}", exc_info=True)
+                return {"status": "error", "message": f"Failed to update submission: {str(db_error)}"}
         else:
             # Create new submission
             logger.info("   Creating new submission...")
-            db_client = supabase_admin if supabase_admin else supabase
-            result = db_client.table("submissions").insert({
-                "assignment_id": assignment_id,
-                "student_id": student_id,
-                "submitted_file_path": storage_result["file_path"],
-                "submitted_file_url": storage_result["storage_url"],
-                "submission_text": submission_text[:5000],
-                "submitted_at": datetime.now().isoformat(),
-                "is_late": is_late,
-                "days_late": days_late,
-                "status": "late" if is_late else "submitted"
-            }).execute()
-            
-            if result.data:
-                submission_id = result.data[0]["id"]
-                logger.info(f"   ✓ Submission created: {submission_id}")
-            else:
-                logger.error("   Submission insert failed")
-                return {"status": "error", "message": "Failed to record submission"}
+            try:
+                # Use admin client for insert (student is already authenticated)
+                db_client = supabase_admin if supabase_admin else supabase
+                result = db_client.table("submissions").insert({
+                    "assignment_id": assignment_id,
+                    "student_id": student_id,
+                    "submitted_file_path": storage_result["file_path"],
+                    "submitted_file_url": storage_result["storage_url"],
+                    "submission_text": submission_text[:5000],
+                    "submitted_at": datetime.now().isoformat(),
+                    "is_late": is_late,
+                    "days_late": days_late,
+                    "status": "late" if is_late else "submitted"
+                }).execute()
+                
+                if result.data:
+                    submission_id = result.data[0]["id"]
+                    logger.info(f"   ✓ Submission created: {submission_id}")
+                else:
+                    logger.error("   Submission insert failed - no data returned")
+                    return {"status": "error", "message": "Failed to record submission"}
+            except Exception as db_error:
+                logger.error(f"   ❌ Database insert failed: {str(db_error)}", exc_info=True)
+                return {"status": "error", "message": f"Failed to create submission: {str(db_error)}"}
 
         # Clean up local file
         if os.path.exists(local_file_path):

@@ -34,16 +34,25 @@ def format_date(date_str: str):
         try:
             return datetime.strptime(date_str, "%d-%m-%Y").date()
         except:
-            return datetime.strptime(date_str, "%d/%m/%Y").date()
+            try:
+                return datetime.strptime(date_str, "%d/%m/%Y").date()
+            except:
+                return datetime.strptime(date_str, "%y-%m-%d").date()
 
 
 # --------------------------------------------------
-# 🔐 DEPENDENCY: GET CURRENT FACULTY USER
+# 🔐 HELPER: Verify Token and Get Faculty User
 # --------------------------------------------------
-def get_current_faculty(credentials = Depends(security)):
-    """Extract and verify faculty user from JWT token."""
+def verify_faculty_token(token: str):
+    """Verify a token string and return faculty user info."""
     try:
-        token = credentials.credentials
+        if not token:
+            raise ValueError("No token provided")
+        
+        # Remove "Bearer " prefix if present
+        if token.startswith("Bearer "):
+            token = token[7:]
+        
         logger.info(f"Token received: {token[:50]}...")
         
         # Verify token with Supabase
@@ -59,6 +68,31 @@ def get_current_faculty(credentials = Depends(security)):
             )
         
         return user_info
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token verification failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {str(e)}"
+        )
+
+
+# --------------------------------------------------
+# 🔐 DEPENDENCY: GET CURRENT FACULTY USER
+# --------------------------------------------------
+def get_current_faculty(credentials = Depends(security)):
+    """Extract and verify faculty user from JWT token."""
+    try:
+        if not credentials or not credentials.credentials:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing authorization header"
+            )
+        
+        token = credentials.credentials
+        return verify_faculty_token(token)
         
     except HTTPException:
         raise
@@ -357,11 +391,10 @@ async def upload_notes(
 # 📚 VIEW MY ASSIGNMENTS
 # --------------------------------------------------
 @router.get("/my-assignments")
-def get_my_assignments(authorization: Optional[str] = Header(None)):
+def get_my_assignments(faculty_user: dict = Depends(get_current_faculty)):
     """Get all assignments created by the logged-in faculty."""
     try:
-        # Verify faculty authentication
-        faculty_user = get_current_faculty(authorization)
+        # Get user_id from verified faculty user
         user_id = faculty_user["user_id"]
         
         logger.info(f"Fetching assignments for faculty: {user_id}")
@@ -389,37 +422,60 @@ def get_my_assignments(authorization: Optional[str] = Header(None)):
 @router.get("/track-submissions/{assignment_id}")
 def track_submissions(
     assignment_id: str,
-    authorization: Optional[str] = Header(None)
+    faculty_user: dict = Depends(get_current_faculty)
 ):
     """Track submissions for a specific assignment."""
     try:
-        # Verify faculty authentication
-        faculty_user = get_current_faculty(authorization)
         
         logger.info(f"Fetching submissions for assignment: {assignment_id}")
         
+        # Fetch evaluations with submission details
         data = supabase.table("evaluations") \
             .select("""
-                final_marks,
-                late_days,
-                submission_status,
-                submitted_at,
-                student_id,
-                students(full_name, email)
+                id,
+                total_marks,
+                marks_obtained,
+                percentage,
+                grade,
+                feedback,
+                evaluated_at,
+                submissions(student_id, submitted_at, is_late, days_late, status)
             """) \
             .eq("assignment_id", assignment_id) \
             .execute()
         
         formatted = []
         for row in data.data:
+            submission = row.get("submissions", {})
+            student_id = submission.get("student_id") if submission else None
+            
+            # Get student profile (if we need full_name and email)
+            student_info = {}
+            if student_id:
+                try:
+                    student_data = supabase.table("user_profiles") \
+                        .select("full_name, email") \
+                        .eq("id", student_id) \
+                        .single() \
+                        .execute()
+                    if student_data.data:
+                        student_info = student_data.data
+                except Exception as e:
+                    logger.warning(f"Could not fetch student profile for {student_id}: {str(e)}")
+            
             formatted.append({
-                "student_id": row.get("student_id"),
-                "student_name": row.get("students", {}).get("full_name"),
-                "email": row.get("students", {}).get("email"),
-                "marks": row.get("final_marks"),
-                "late_days": row.get("late_days"),
-                "status": row.get("submission_status"),
-                "submitted_at": row.get("submitted_at")
+                "student_id": student_id,
+                "student_name": student_info.get("full_name", "N/A"),
+                "email": student_info.get("email", "N/A"),
+                "marks": row.get("marks_obtained"),
+                "total_marks": row.get("total_marks"),
+                "percentage": row.get("percentage"),
+                "grade": row.get("grade"),
+                "feedback": row.get("feedback"),
+                "late_days": submission.get("days_late") if submission else 0,
+                "status": submission.get("status") if submission else "pending",
+                "submitted_at": submission.get("submitted_at") if submission else None,
+                "evaluated_at": row.get("evaluated_at")
             })
         
         logger.info(f"✓ Found {len(formatted)} submissions")

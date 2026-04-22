@@ -1,6 +1,9 @@
 import pdfplumber
 import tempfile
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def extract_text(file_input):
@@ -8,6 +11,7 @@ def extract_text(file_input):
     Supports:
     - file path (recommended)
     - UploadFile (fallback)
+    Returns empty string if extraction fails
     """
 
     text = ""
@@ -18,6 +22,9 @@ def extract_text(file_input):
         # CASE 1: FILE PATH (BEST)
         # -------------------------------
         if isinstance(file_input, str):
+            if not os.path.exists(file_input):
+                logger.error(f"PDF file not found: {file_input}")
+                return ""
 
             with pdfplumber.open(file_input) as pdf:
                 for page in pdf.pages:
@@ -44,9 +51,12 @@ def extract_text(file_input):
             return text.strip()
 
     except Exception as e:
-        print("PDF extraction error:", e)
+        logger.error(f"PDF extraction error: {str(e)}")
         return ""
 
     finally:
         if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                logger.warning(f"Could not clean up temp file: {str(e)}")

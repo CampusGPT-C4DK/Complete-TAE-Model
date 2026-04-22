@@ -5,6 +5,7 @@ Handles file uploads and downloads for teacher notes and generated assignments
 
 import logging
 import os
+import re
 from typing import BinaryIO, Optional, Dict, Any
 from datetime import date
 from app.database import supabase, supabase_admin
@@ -15,6 +16,17 @@ logger = logging.getLogger(__name__)
 TEACHER_NOTES_BUCKET = "teacher-notes"
 ASSIGNMENTS_BUCKET = "assignments"
 SUBMISSIONS_BUCKET = "submissions"
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to remove problematic characters for Supabase Storage."""
+    # Replace special characters with underscore
+    sanitized = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
+    # Remove multiple underscores
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip('_')
+    return sanitized
 
 
 class StorageService:
@@ -315,6 +327,7 @@ class StorageService:
     ) -> Dict[str, Any]:
         """
         Upload student submission file to Supabase Storage.
+        Uses admin client (service role) to bypass storage RLS policies.
         
         Args:
             file_path: Path to the file to upload
@@ -331,26 +344,55 @@ class StorageService:
         try:
             logger.info(f"📤 Uploading student submission: {file_path}")
             
+            # Verify file exists and get size
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+            
+            file_size = os.path.getsize(file_path)
+            logger.info(f"   File size: {file_size} bytes")
+            
+            # Sanitize filename
+            safe_filename = sanitize_filename(file_name)
+            logger.info(f"   Original filename: {file_name} → Safe filename: {safe_filename}")
+            
             # Read file
-            with open(file_path, "rb") as f:
-                file_content = f.read()
+            try:
+                with open(file_path, "rb") as f:
+                    file_content = f.read()
+                logger.info(f"   ✓ File read successfully")
+            except Exception as e:
+                logger.error(f"   ❌ Failed to read file: {str(e)}")
+                raise
             
             # Generate storage path
-            storage_path = f"{assignment_id}/{student_id}/{file_name}"
+            storage_path = f"{assignment_id}/{student_id}/{safe_filename}"
             
             logger.info(f"   Storing at: {storage_path}")
             
             # Upload to Supabase Storage
-            response = supabase.storage.from_(SUBMISSIONS_BUCKET).upload(
-                storage_path,
-                file_content,
-                file_options={"content-type": "application/pdf"}
-            )
+            try:
+                logger.info(f"   🚀 Starting upload to Supabase...")
+                # Use admin client to bypass storage RLS policies
+                storage_client = supabase_admin if supabase_admin else supabase
+                response = storage_client.storage.from_(SUBMISSIONS_BUCKET).upload(
+                    storage_path,
+                    file_content,
+                    file_options={"content-type": "application/pdf"}
+                )
+                logger.info(f"   ✓ Upload response received")
+            except Exception as upload_error:
+                logger.error(f"   ❌ Upload error: {str(upload_error)}")
+                raise Exception(f"Supabase storage upload failed: {str(upload_error)}")
             
             logger.info(f"✓ Submission uploaded: {storage_path}")
             
             # Get public URL
-            url = supabase.storage.from_(SUBMISSIONS_BUCKET).get_public_url(storage_path)
+            try:
+                url = supabase.storage.from_(SUBMISSIONS_BUCKET).get_public_url(storage_path)
+                logger.info(f"   ✓ Public URL obtained")
+            except Exception as url_error:
+                logger.warning(f"   ⚠️ Could not get public URL: {str(url_error)}")
+                url = f"https://{supabase.storage.url}/object/public/{SUBMISSIONS_BUCKET}/{storage_path}"
             
             return {
                 "status": "success",
@@ -361,5 +403,5 @@ class StorageService:
             }
             
         except Exception as e:
-            logger.error(f"❌ Submission upload failed: {str(e)}")
+            logger.error(f"❌ Submission upload failed: {str(e)}", exc_info=True)
             raise

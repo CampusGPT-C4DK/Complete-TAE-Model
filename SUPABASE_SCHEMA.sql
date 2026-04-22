@@ -298,6 +298,14 @@ CREATE POLICY "Faculty view assignment submissions" ON public.submissions
     )
   );
 
+-- Students can insert their own submissions
+CREATE POLICY "Students create submissions" ON public.submissions
+  FOR INSERT WITH CHECK (student_id = auth.uid());
+
+-- Students can update their own submissions
+CREATE POLICY "Students update own submissions" ON public.submissions
+  FOR UPDATE USING (student_id = auth.uid());
+
 -- Students can see their own evaluations
 CREATE POLICY "Students view own evaluations" ON public.evaluations
   FOR SELECT USING (

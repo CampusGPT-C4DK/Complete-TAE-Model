@@ -91,20 +91,44 @@ def get_pending_submissions(faculty_user: dict = Depends(get_current_faculty)):
                 days_late,
                 submitted_at,
                 submitted_file_url,
-                assignments(assignment_no, subject, submission_date),
-                user_profiles!student_id(email, full_name)
+                assignments(assignment_no, subject, submission_date)
             """) \
             .in_("assignment_id", assignment_ids) \
             .neq("status", "graded") \
             .order("submitted_at", desc=True) \
             .execute()
         
-        logger.info(f"✓ Found {len(submissions.data)} pending submissions")
+        # Fetch student profiles for each submission
+        formatted_data = []
+        for submission in submissions.data:
+            student_id = submission.get("student_id")
+            student_info = {"email": "N/A", "full_name": "N/A"}
+            
+            if student_id:
+                try:
+                    student_data = supabase.table("user_profiles") \
+                        .select("email, full_name") \
+                        .eq("id", student_id) \
+                        .single() \
+                        .execute()
+                    if student_data.data:
+                        student_info = student_data.data
+                except Exception as e:
+                    logger.warning(f"Could not fetch student profile for {student_id}: {str(e)}")
+            
+            formatted_submission = {
+                **submission,
+                "student_email": student_info.get("email"),
+                "student_name": student_info.get("full_name")
+            }
+            formatted_data.append(formatted_submission)
+        
+        logger.info(f"✓ Found {len(formatted_data)} pending submissions")
         
         return {
             "status": "success",
-            "count": len(submissions.data),
-            "data": submissions.data
+            "count": len(formatted_data),
+            "data": formatted_data
         }
         
     except HTTPException as he:
@@ -132,7 +156,7 @@ def get_submission_for_grading(
         
         logger.info(f"Fetching submission details: {submission_id}")
         
-        # Get submission with assignment and student info
+        # Get submission with assignment info
         submission = supabase.table("submissions") \
             .select("""
                 id,
@@ -152,8 +176,7 @@ def get_submission_for_grading(
                     total_questions,
                     pdf_url,
                     faculty_id
-                ),
-                user_profiles!student_id(email, full_name)
+                )
             """) \
             .eq("id", submission_id) \
             .execute()
@@ -174,6 +197,26 @@ def get_submission_for_grading(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You don't have permission to grade this submission"
             )
+        
+        # Fetch student profile
+        student_id = submission_data.get("student_id")
+        student_info = {"email": "N/A", "full_name": "N/A"}
+        
+        if student_id:
+            try:
+                student_data = supabase.table("user_profiles") \
+                    .select("email, full_name") \
+                    .eq("id", student_id) \
+                    .single() \
+                    .execute()
+                if student_data.data:
+                    student_info = student_data.data
+            except Exception as e:
+                logger.warning(f"Could not fetch student profile for {student_id}: {str(e)}")
+        
+        # Add student info to submission data
+        submission_data["student_email"] = student_info.get("email")
+        submission_data["student_name"] = student_info.get("full_name")
         
         # Get any existing evaluation
         evaluation = supabase.table("evaluations") \
@@ -367,6 +410,7 @@ def get_evaluation_results(submission_id: str):
         evaluation = supabase.table("evaluations") \
             .select("""
                 id,
+                faculty_id,
                 total_marks,
                 marks_obtained,
                 percentage,
@@ -375,8 +419,7 @@ def get_evaluation_results(submission_id: str):
                 strengths,
                 areas_for_improvement,
                 model_evaluation,
-                evaluated_at,
-                user_profiles!faculty_id(full_name)
+                evaluated_at
             """) \
             .eq("submission_id", submission_id) \
             .execute()
@@ -388,11 +431,32 @@ def get_evaluation_results(submission_id: str):
                 "message": "This submission has not been evaluated yet"
             }
         
+        evaluation_data = evaluation.data[0]
+        
+        # Fetch faculty profile
+        faculty_id = evaluation_data.get("faculty_id")
+        faculty_info = {"full_name": "N/A"}
+        
+        if faculty_id:
+            try:
+                faculty_data = supabase.table("user_profiles") \
+                    .select("full_name") \
+                    .eq("id", faculty_id) \
+                    .single() \
+                    .execute()
+                if faculty_data.data:
+                    faculty_info = faculty_data.data
+            except Exception as e:
+                logger.warning(f"Could not fetch faculty profile for {faculty_id}: {str(e)}")
+        
+        # Add faculty info to evaluation data
+        evaluation_data["faculty_full_name"] = faculty_info.get("full_name")
+        
         logger.info(f"✓ Retrieved evaluation results")
         
         return {
             "status": "success",
-            "evaluation": evaluation.data[0]
+            "evaluation": evaluation_data
         }
         
     except HTTPException as he:
