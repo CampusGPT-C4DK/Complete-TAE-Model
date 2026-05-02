@@ -59,13 +59,15 @@ def get_pending_submissions(faculty_user: dict = Depends(get_current_faculty)):
     Faculty can only see their own assignments.
     """
     try:
+        db_client = supabase_admin if supabase_admin else supabase
+
         # Get faculty_id from verified user
         faculty_id = faculty_user["user_id"]
         
         logger.info(f"Fetching pending submissions for faculty: {faculty_id}")
         
         # Get all assignments by this faculty
-        assignments = supabase.table("assignments") \
+        assignments = db_client.table("assignments") \
             .select("id") \
             .eq("faculty_id", faculty_id) \
             .execute()
@@ -80,8 +82,9 @@ def get_pending_submissions(faculty_user: dict = Depends(get_current_faculty)):
                 "data": []
             }
         
-        # Get pending submissions for these assignments
-        submissions = supabase.table("submissions") \
+        # Get submissions for these assignments.
+        # Frontend will separate "Pending" vs "Graded" based on evaluation presence.
+        submissions = db_client.table("submissions") \
             .select("""
                 id,
                 assignment_id,
@@ -94,7 +97,6 @@ def get_pending_submissions(faculty_user: dict = Depends(get_current_faculty)):
                 assignments(assignment_no, subject, submission_date)
             """) \
             .in_("assignment_id", assignment_ids) \
-            .neq("status", "graded") \
             .order("submitted_at", desc=True) \
             .execute()
         
@@ -116,10 +118,35 @@ def get_pending_submissions(faculty_user: dict = Depends(get_current_faculty)):
                 except Exception as e:
                     logger.warning(f"Could not fetch student profile for {student_id}: {str(e)}")
             
+            # Pull evaluation (if any) so UI can persist marks/grade after refresh.
+            evaluation_info = None
+            allow_resubmission = False
+            try:
+                eval_res = db_client.table("evaluations") \
+                    .select("total_marks, marks_obtained, percentage, grade, feedback, evaluated_at, model_evaluation") \
+                    .eq("submission_id", submission.get("id")) \
+                    .limit(1) \
+                    .execute()
+                if eval_res.data:
+                    evaluation_info = eval_res.data[0]
+                    model_evaluation = evaluation_info.get("model_evaluation")
+                    if isinstance(model_evaluation, str) and model_evaluation.strip().startswith("{"):
+                        try:
+                            parsed = json.loads(model_evaluation)
+                            meta = parsed.get("__meta") if isinstance(parsed, dict) else None
+                            allow_resubmission = bool((meta or {}).get("allow_resubmission"))
+                        except Exception:
+                            allow_resubmission = False
+            except Exception as e:
+                logger.warning(f"Could not fetch evaluation for submission {submission.get('id')}: {str(e)}")
+
             formatted_submission = {
                 **submission,
                 "student_email": student_info.get("email"),
-                "student_name": student_info.get("full_name")
+                "student_name": student_info.get("full_name"),
+                "evaluation": evaluation_info,
+                "is_evaluated": bool(evaluation_info),
+                "allow_resubmission": allow_resubmission
             }
             formatted_data.append(formatted_submission)
         
@@ -151,13 +178,15 @@ def get_submission_for_grading(
     Faculty can only see submissions for their assignments.
     """
     try:
+        db_client = supabase_admin if supabase_admin else supabase
+
         # Get faculty_id from verified user
         faculty_id = faculty_user["user_id"]
         
         logger.info(f"Fetching submission details: {submission_id}")
         
         # Get submission with assignment info
-        submission = supabase.table("submissions") \
+        submission = db_client.table("submissions") \
             .select("""
                 id,
                 assignment_id,
@@ -219,7 +248,7 @@ def get_submission_for_grading(
         submission_data["student_name"] = student_info.get("full_name")
         
         # Get any existing evaluation
-        evaluation = supabase.table("evaluations") \
+        evaluation = db_client.table("evaluations") \
             .select("*") \
             .eq("submission_id", submission_id) \
             .execute()
@@ -248,6 +277,8 @@ def grade_submission(
     total_marks: int = Form(...),
     marks_obtained: int = Form(...),
     grade: str = Form(...),
+    result_status: Optional[str] = Form(default=None),
+    allow_resubmission: Optional[bool] = Form(default=False),
     feedback: str = Form(default=""),
     strengths: str = Form(default=""),
     areas_for_improvement: str = Form(default=""),
@@ -259,13 +290,15 @@ def grade_submission(
     Faculty can only grade submissions for their assignments.
     """
     try:
+        db_client = supabase_admin if supabase_admin else supabase
+
         # Get faculty_id from verified user
         faculty_id = faculty_user["user_id"]
         
         logger.info(f"Faculty {faculty_id} grading submission: {submission_id}")
         
         # Get submission data
-        submission = supabase.table("submissions") \
+        submission = db_client.table("submissions") \
             .select("assignment_id, student_id, status") \
             .eq("id", submission_id) \
             .execute()
@@ -282,7 +315,7 @@ def grade_submission(
         student_id = submission_data["student_id"]
         
         # Verify faculty owns this assignment
-        assignment = supabase.table("assignments") \
+        assignment = db_client.table("assignments") \
             .select("faculty_id") \
             .eq("id", assignment_id) \
             .execute()
@@ -301,9 +334,33 @@ def grade_submission(
         
         # Calculate percentage
         percentage = (marks_obtained / total_marks * 100) if total_marks > 0 else 0
+        normalized_result_status = (result_status or "").strip().lower()
+        if normalized_result_status not in {"passed", "failed"}:
+            normalized_result_status = "passed" if marks_obtained >= 40 else "failed"
+        allow_resubmission = bool(allow_resubmission) and normalized_result_status == "failed"
+
+        # Persist resubmission toggle in model_evaluation JSON metadata so no DB migration is required.
+        model_eval_payload: Dict[str, Any]
+        if (model_evaluation or "").strip().startswith("{"):
+            try:
+                parsed = json.loads(model_evaluation)
+                model_eval_payload = parsed if isinstance(parsed, dict) else {"notes": model_evaluation}
+            except Exception:
+                model_eval_payload = {"notes": model_evaluation}
+        elif (model_evaluation or "").strip():
+            model_eval_payload = {"notes": model_evaluation}
+        else:
+            model_eval_payload = {}
+
+        meta = model_eval_payload.get("__meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["allow_resubmission"] = allow_resubmission
+        model_eval_payload["__meta"] = meta
+        model_evaluation_json = json.dumps(model_eval_payload)
         
         # Check if evaluation exists
-        existing_eval = supabase.table("evaluations") \
+        existing_eval = db_client.table("evaluations") \
             .select("id") \
             .eq("submission_id", submission_id) \
             .execute()
@@ -315,7 +372,6 @@ def grade_submission(
             logger.info(f"   Updating existing evaluation...")
             eval_id = existing_eval.data[0]["id"]
             
-            db_client = supabase_admin if supabase_admin else supabase
             result = db_client.table("evaluations").update({
                 "total_marks": total_marks,
                 "marks_obtained": marks_obtained,
@@ -324,7 +380,7 @@ def grade_submission(
                 "feedback": feedback,
                 "strengths": strengths,
                 "areas_for_improvement": areas_for_improvement,
-                "model_evaluation": model_evaluation,
+                "model_evaluation": model_evaluation_json,
                 "evaluated_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }).eq("id", eval_id).execute()
@@ -333,7 +389,6 @@ def grade_submission(
         else:
             # Create new evaluation
             logger.info(f"   Creating new evaluation...")
-            db_client = supabase_admin if supabase_admin else supabase
             result = db_client.table("evaluations").insert({
                 "submission_id": submission_id,
                 "assignment_id": assignment_id,
@@ -345,7 +400,7 @@ def grade_submission(
                 "feedback": feedback,
                 "strengths": strengths,
                 "areas_for_improvement": areas_for_improvement,
-                "model_evaluation": model_evaluation,
+                "model_evaluation": model_evaluation_json,
                 "evaluated_at": datetime.now().isoformat()
             }).execute()
             
@@ -355,11 +410,10 @@ def grade_submission(
             
             logger.info(f"   ✓ Evaluation created")
         
-        # Update submission status to graded
-        logger.info(f"   Updating submission status to graded...")
-        db_client = supabase_admin if supabase_admin else supabase
+        # Update submission status to passed/failed so student can clearly see final outcome.
+        logger.info(f"   Updating submission status to {normalized_result_status}...")
         db_client.table("submissions").update({
-            "status": "graded",
+            "status": normalized_result_status,
             "updated_at": datetime.now().isoformat()
         }).eq("id", submission_id).execute()
         
@@ -371,7 +425,9 @@ def grade_submission(
             "submission_id": submission_id,
             "marks_obtained": marks_obtained,
             "percentage": round(percentage, 2),
-            "grade": grade
+            "grade": grade,
+            "result_status": normalized_result_status,
+            "allow_resubmission": allow_resubmission
         }
         
     except HTTPException as he:
@@ -449,14 +505,26 @@ def get_evaluation_results(submission_id: str):
             except Exception as e:
                 logger.warning(f"Could not fetch faculty profile for {faculty_id}: {str(e)}")
         
-        # Add faculty info to evaluation data
+        # Add faculty info + final result status to evaluation data
         evaluation_data["faculty_full_name"] = faculty_info.get("full_name")
+        evaluation_data["result_status"] = submission.data[0].get("status")
         
         logger.info(f"✓ Retrieved evaluation results")
         
+        allow_resubmission = False
+        model_eval = evaluation_data.get("model_evaluation")
+        if isinstance(model_eval, str) and model_eval.strip().startswith("{"):
+            try:
+                parsed = json.loads(model_eval)
+                meta = parsed.get("__meta") if isinstance(parsed, dict) else None
+                allow_resubmission = bool((meta or {}).get("allow_resubmission"))
+            except Exception:
+                allow_resubmission = False
+
         return {
             "status": "success",
-            "evaluation": evaluation_data
+            "evaluation": evaluation_data,
+            "allow_resubmission": allow_resubmission
         }
         
     except HTTPException as he:
@@ -479,13 +547,15 @@ def get_assignment_grading_stats(
     Faculty can only see stats for their assignments.
     """
     try:
+        db_client = supabase_admin if supabase_admin else supabase
+
         # Get faculty_id from verified user
         faculty_id = faculty_user["user_id"]
         
         logger.info(f"Fetching grading stats for assignment: {assignment_id}")
         
         # Verify faculty owns this assignment
-        assignment = supabase.table("assignments") \
+        assignment = db_client.table("assignments") \
             .select("faculty_id") \
             .eq("id", assignment_id) \
             .execute()
@@ -498,13 +568,13 @@ def get_assignment_grading_stats(
             )
         
         # Get submission statistics
-        submissions = supabase.table("submissions") \
-            .select("status") \
+        submissions = db_client.table("submissions") \
+            .select("status, is_late") \
             .eq("assignment_id", assignment_id) \
             .execute()
         
         # Get evaluation statistics
-        evaluations = supabase.table("evaluations") \
+        evaluations = db_client.table("evaluations") \
             .select("marks_obtained, percentage, grade") \
             .eq("assignment_id", assignment_id) \
             .execute()
@@ -513,9 +583,9 @@ def get_assignment_grading_stats(
         
         # Calculate stats
         total_submissions = len(submissions.data)
-        graded_count = sum(1 for s in submissions.data if s["status"] == "graded")
-        pending_count = total_submissions - graded_count
-        late_count = sum(1 for s in submissions.data if s.get("is_late", False))
+        graded_count = sum(1 for s in submissions.data if s.get("status") in ["graded", "passed", "failed"])
+        pending_count = sum(1 for s in submissions.data if s.get("status") in ["submitted", "late"])
+        late_count = sum(1 for s in submissions.data if bool(s.get("is_late")))
         
         avg_marks = None
         avg_percentage = None

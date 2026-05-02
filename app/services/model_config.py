@@ -1,7 +1,7 @@
 """
 Dynamic Model Configuration System
 Handles automatic model selection based on .env configuration
-Supports: Ollama (phi3:mini, mistral), Google Gemini, etc.
+Supports: Ollama (phi3:mini, mistral), Google Gemini with multi-key fallback, etc.
 """
 
 import logging
@@ -18,10 +18,12 @@ USE_MISTRAL = settings.USE_MISTRAL
 OLLAMA_HOST = settings.OLLAMA_HOST
 OLLAMA_MODEL = settings.OLLAMA_MODEL
 
-GEMINI_API_KEY = settings.GEMINI_API_KEY
 GEMINI_MODEL = settings.GEMINI_MODEL
-
 MISTRAL_API_KEY = settings.MISTRAL_API_KEY
+
+# Gemini multi-key support
+GEMINI_API_KEYS = []  # List of available API keys
+GEMINI_CURRENT_KEY_INDEX = 0  # Current key being used
 
 # ==================== MODEL PROVIDER DETECTION ====================
 
@@ -46,6 +48,8 @@ def validate_model_config() -> bool:
     Validate that the selected model has proper configuration.
     Returns: True if valid, False otherwise
     """
+    global GEMINI_API_KEYS, GEMINI_CURRENT_KEY_INDEX
+    
     active_model = get_active_model()
     
     if active_model is None:
@@ -58,13 +62,20 @@ def validate_model_config() -> bool:
         return True
     
     elif active_model == "gemini":
-        if not GEMINI_API_KEY:
-            logger.error("❌ GEMINI_API_KEY not set in .env")
+        # Load all available Gemini API keys
+        GEMINI_API_KEYS = settings.get_gemini_api_keys()
+        
+        if not GEMINI_API_KEYS:
+            logger.error("❌ No GEMINI_API_KEY configured in .env")
             return False
-        logger.info("✅ Using Google Gemini")
+        
+        logger.info(f"✅ Using Google Gemini with {len(GEMINI_API_KEYS)} API key(s)")
+        
         try:
             import google.generativeai as genai
-            genai.configure(api_key=GEMINI_API_KEY)
+            genai.configure(api_key=GEMINI_API_KEYS[0])
+            GEMINI_CURRENT_KEY_INDEX = 0
+            logger.info(f"✅ Gemini: Configured with API key #1/{len(GEMINI_API_KEYS)}")
         except ImportError:
             logger.error("❌ google-generativeai not installed. Run: pip install google-generativeai")
             return False
@@ -108,6 +119,31 @@ def call_llm(prompt: str, temperature: float = 0.7) -> str:
         raise ValueError(f"Unknown model: {active_model}")
 
 
+def _ensure_gemini_keys_initialized() -> None:
+    """
+    Ensure Gemini key state is initialized before making API calls.
+    This avoids index errors when call_llm() is used without calling validate_model_config().
+    """
+    global GEMINI_API_KEYS, GEMINI_CURRENT_KEY_INDEX
+
+    if not GEMINI_API_KEYS:
+        GEMINI_API_KEYS = settings.get_gemini_api_keys()
+        GEMINI_CURRENT_KEY_INDEX = 0
+        logger.info(f"✅ Gemini keys loaded: {len(GEMINI_API_KEYS)} key(s)")
+
+    if not GEMINI_API_KEYS:
+        raise ValueError(
+            "No GEMINI_API_KEY configured. Set GEMINI_API_KEY (and optional GEMINI_API_KEY_2/3/4) in .env"
+        )
+
+    if GEMINI_CURRENT_KEY_INDEX >= len(GEMINI_API_KEYS):
+        logger.warning(
+            "⚠️ Gemini key index out of range; resetting to first key "
+            f"(index={GEMINI_CURRENT_KEY_INDEX}, total={len(GEMINI_API_KEYS)})"
+        )
+        GEMINI_CURRENT_KEY_INDEX = 0
+
+
 def _call_ollama(prompt: str, temperature: float = 0.7) -> str:
     """Call Ollama model (phi3:mini or other local models)"""
     try:
@@ -128,11 +164,20 @@ def _call_ollama(prompt: str, temperature: float = 0.7) -> str:
 
 
 def _call_gemini(prompt: str, temperature: float = 0.7) -> str:
-    """Call Google Gemini model"""
+    """
+    Call Google Gemini model with automatic key rotation on quota exhaustion.
+    
+    When a key is exhausted (quota exceeded), automatically switches to the next available key.
+    """
+    global GEMINI_API_KEYS, GEMINI_CURRENT_KEY_INDEX
+    
     try:
         import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
+
+        _ensure_gemini_keys_initialized()
         
+        # Configure with current key
+        genai.configure(api_key=GEMINI_API_KEYS[GEMINI_CURRENT_KEY_INDEX])
         model = genai.GenerativeModel(GEMINI_MODEL)
         
         response = model.generate_content(
@@ -149,8 +194,58 @@ def _call_gemini(prompt: str, temperature: float = 0.7) -> str:
         logger.error("❌ google-generativeai not installed. Run: pip install google-generativeai")
         raise
     except Exception as e:
-        logger.error(f"❌ Gemini error: {str(e)}")
-        raise
+        error_str = str(e).lower()
+        
+        # Check for quota/rate limit errors (429, 503, quota exceeded)
+        is_quota_error = any(keyword in error_str for keyword in [
+            "429", "quota", "exhausted", "rate limit", "503", 
+            "service unavailable", "resource exhausted"
+        ])
+        
+        if is_quota_error:
+            logger.warning(f"⚠️  Current Gemini API key quota/rate limit exceeded: {str(e)}")
+            
+            # Try to rotate to next key
+            if _rotate_gemini_key():
+                logger.info("🔄 Retrying with next API key...")
+                try:
+                    # Retry with new key
+                    return _call_gemini(prompt, temperature)
+                except Exception as retry_error:
+                    logger.error(f"❌ Retry failed with new key: {str(retry_error)}")
+                    raise RuntimeError(f"Gemini API error (all keys failed): {str(retry_error)}")
+            else:
+                # No more keys available
+                logger.error("❌ All Gemini API keys exhausted")
+                raise RuntimeError("All configured Gemini API keys have been exhausted")
+        else:
+            # Other errors (not quota-related)
+            logger.error(f"❌ Gemini error: {str(e)}")
+            raise
+
+
+def _rotate_gemini_key() -> bool:
+    """
+    Rotate to the next available Gemini API key when current one is exhausted.
+    
+    Returns:
+        bool: True if successfully rotated to next key, False if no more keys available
+    """
+    global GEMINI_CURRENT_KEY_INDEX, GEMINI_API_KEYS
+    
+    next_index = GEMINI_CURRENT_KEY_INDEX + 1
+    
+    if next_index >= len(GEMINI_API_KEYS):
+        logger.error(f"❌ All {len(GEMINI_API_KEYS)} Gemini API keys exhausted")
+        return False
+    
+    try:
+        GEMINI_CURRENT_KEY_INDEX = next_index
+        logger.warning(f"🔄 Rotated to Gemini API key #{next_index + 1}/{len(GEMINI_API_KEYS)}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to rotate to next API key: {str(e)}")
+        return False
 
 
 def _call_mistral(prompt: str, temperature: float = 0.7) -> str:

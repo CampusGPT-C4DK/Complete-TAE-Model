@@ -4,6 +4,7 @@ from typing import List, Optional
 import os
 import logging
 from datetime import datetime, timedelta
+import json
 
 from app.database import supabase, supabase_admin
 from app.services.auth_service import AuthService
@@ -19,6 +20,26 @@ StorageService.ensure_buckets_exist()
 
 # HTTPBearer security scheme for Swagger integration
 security = HTTPBearer()
+
+
+def _is_resubmission_allowed(db_client, submission_id: str) -> bool:
+    """Check evaluation metadata for allow_resubmission toggle."""
+    try:
+        eval_res = db_client.table("evaluations") \
+            .select("model_evaluation") \
+            .eq("submission_id", submission_id) \
+            .limit(1) \
+            .execute()
+        if not eval_res.data:
+            return False
+        model_eval = eval_res.data[0].get("model_evaluation")
+        if isinstance(model_eval, str) and model_eval.strip().startswith("{"):
+            parsed = json.loads(model_eval)
+            meta = parsed.get("__meta") if isinstance(parsed, dict) else None
+            return bool((meta or {}).get("allow_resubmission"))
+    except Exception:
+        return False
+    return False
 
 
 # --------------------------------------------------
@@ -217,8 +238,11 @@ async def submit_assignment(
         
         # Parse submission date
         try:
-            submission_deadline = datetime.strptime(submission_date_str, "%Y-%m-%d").date() if isinstance(submission_date_str, str) else submission_deadline
-        except:
+            if isinstance(submission_date_str, str):
+                submission_deadline = datetime.strptime(submission_date_str, "%Y-%m-%d").date()
+            else:
+                submission_deadline = datetime.now().date()
+        except Exception:
             submission_deadline = datetime.now().date()
 
         # Check if late
@@ -242,40 +266,59 @@ async def submit_assignment(
             logger.error(f"   ❌ Storage upload failed: {str(storage_error)}", exc_info=True)
             return {"status": "error", "message": f"File upload failed: {str(storage_error)}"}
 
-        # Check if submission already exists (use admin client to bypass RLS for read)
+        # Check existing submissions for this assignment + student.
+        # Behavior:
+        # - If latest is failed + resubmission enabled => create NEW submission row
+        # - If latest is failed + resubmission disabled => block
+        # - Else (normal first/ongoing) => update latest row to avoid duplicates
         db_client = supabase_admin if supabase_admin else supabase
         existing_submission = db_client.table("submissions") \
-            .select("id") \
+            .select("id, status, created_at") \
             .eq("assignment_id", assignment_id) \
             .eq("student_id", student_id) \
+            .order("created_at", desc=True) \
             .execute()
 
         submission_id = None
+        create_new_submission = False
         
         if existing_submission.data:
-            # Update existing submission
-            logger.info("   Updating existing submission...")
-            submission_id = existing_submission.data[0]["id"]
-            
-            try:
-                # Use admin client for update (student is already authenticated)
-                db_client = supabase_admin if supabase_admin else supabase
-                result = db_client.table("submissions").update({
-                    "submitted_file_path": storage_result["file_path"],
-                    "submitted_file_url": storage_result["storage_url"],
-                    "submission_text": submission_text[:5000],
-                    "submitted_at": datetime.now().isoformat(),
-                    "is_late": is_late,
-                    "days_late": days_late,
-                    "status": "late" if is_late else "submitted",
-                    "updated_at": datetime.now().isoformat()
-                }).eq("id", submission_id).execute()
-                
-                logger.info(f"   ✓ Submission updated: {submission_id}")
-            except Exception as db_error:
-                logger.error(f"   ❌ Database update failed: {str(db_error)}", exc_info=True)
-                return {"status": "error", "message": f"Failed to update submission: {str(db_error)}"}
-        else:
+            latest = existing_submission.data[0]
+            latest_id = latest.get("id")
+            latest_status = str(latest.get("status") or "").strip().lower()
+
+            if latest_status == "failed":
+                allowed = _is_resubmission_allowed(db_client, latest_id)
+                if not allowed:
+                    return {
+                        "status": "error",
+                        "message": "Resubmission is not enabled by faculty for this failed submission."
+                    }
+                create_new_submission = True
+                logger.info("   Latest submission is failed + resubmission enabled -> creating new submission row")
+            else:
+                submission_id = latest_id
+
+            if not create_new_submission:
+                logger.info("   Updating latest submission...")
+                try:
+                    result = db_client.table("submissions").update({
+                        "submitted_file_path": storage_result["file_path"],
+                        "submitted_file_url": storage_result["storage_url"],
+                        "submission_text": submission_text[:5000],
+                        "submitted_at": datetime.now().isoformat(),
+                        "is_late": is_late,
+                        "days_late": days_late,
+                        "status": "late" if is_late else "submitted",
+                        "updated_at": datetime.now().isoformat()
+                    }).eq("id", submission_id).execute()
+                    
+                    logger.info(f"   ✓ Submission updated: {submission_id}")
+                except Exception as db_error:
+                    logger.error(f"   ❌ Database update failed: {str(db_error)}", exc_info=True)
+                    return {"status": "error", "message": f"Failed to update submission: {str(db_error)}"}
+
+        if (not existing_submission.data) or create_new_submission:
             # Create new submission
             logger.info("   Creating new submission...")
             try:
@@ -316,7 +359,8 @@ async def submit_assignment(
             "is_late": is_late,
             "days_late": days_late,
             "storage_url": storage_result["storage_url"],
-            "storage_path": storage_result["file_path"]
+            "storage_path": storage_result["file_path"],
+            "is_resubmission": create_new_submission
         }
 
     except HTTPException as he:
@@ -337,7 +381,7 @@ def get_available_assignments(student_user: dict = Depends(get_current_student))
         logger.info(f"Fetching available assignments for student")
         
         data = supabase.table("assignments") \
-            .select("id, assignment_no, subject, branch, semester, difficulty, given_date, submission_date, created_by, status") \
+            .select("id, assignment_no, subject, branch, semester, difficulty, given_date, submission_date, created_by, status, pdf_url, pdf_storage_path") \
             .eq("status", "active") \
             .order("created_at", desc=True) \
             .execute()
@@ -369,7 +413,9 @@ def get_my_submissions(student_user: dict = Depends(get_current_student)):
         
         logger.info(f"Fetching submissions for student: {student_id}")
         
-        data = supabase.table("submissions") \
+        # Use admin client when available to avoid RLS blocking reads.
+        db_client = supabase_admin if supabase_admin else supabase
+        data = db_client.table("submissions") \
             .select("""
                 id,
                 assignment_id,
@@ -384,12 +430,40 @@ def get_my_submissions(student_user: dict = Depends(get_current_student)):
             .order("created_at", desc=True) \
             .execute()
         
-        logger.info(f"✓ Found {len(data.data)} submissions")
+        # Attach evaluation snippet + resubmission flag for richer student UI.
+        enriched_rows = []
+        for row in (data.data or []):
+            submission_id = row.get("id")
+            evaluation_info = None
+            allow_resubmission = False
+            try:
+                eval_res = db_client.table("evaluations") \
+                    .select("marks_obtained, total_marks, grade, feedback, model_evaluation") \
+                    .eq("submission_id", submission_id) \
+                    .limit(1) \
+                    .execute()
+                if eval_res.data:
+                    evaluation_info = eval_res.data[0]
+                    model_eval = evaluation_info.get("model_evaluation")
+                    if isinstance(model_eval, str) and model_eval.strip().startswith("{"):
+                        try:
+                            parsed = json.loads(model_eval)
+                            meta = parsed.get("__meta") if isinstance(parsed, dict) else None
+                            allow_resubmission = bool((meta or {}).get("allow_resubmission"))
+                        except Exception:
+                            allow_resubmission = False
+            except Exception as e:
+                logger.warning(f"Could not fetch evaluation for submission {submission_id}: {str(e)}")
+
+            enriched = {**row, "evaluation": evaluation_info, "allow_resubmission": allow_resubmission}
+            enriched_rows.append(enriched)
+
+        logger.info(f"✓ Found {len(enriched_rows)} submissions")
         
         return {
             "status": "success",
-            "count": len(data.data),
-            "data": data.data
+            "count": len(enriched_rows),
+            "data": enriched_rows
         }
         
     except HTTPException as he:
@@ -414,8 +488,10 @@ def get_submission_details(
         
         logger.info(f"Fetching submission details: {submission_id}")
         
+        # Use admin client when available to avoid RLS blocking reads.
+        db_client = supabase_admin if supabase_admin else supabase
         # Get submission
-        submission = supabase.table("submissions") \
+        submission = db_client.table("submissions") \
             .select("*") \
             .eq("id", submission_id) \
             .eq("student_id", student_id) \
@@ -431,17 +507,30 @@ def get_submission_details(
         submission_data = submission.data[0]
         
         # Get evaluation if exists
-        evaluation = supabase.table("evaluations") \
+        evaluation = db_client.table("evaluations") \
             .select("*") \
             .eq("submission_id", submission_id) \
             .execute()
         
         logger.info(f"✓ Retrieved submission details")
         
+        # Parse resubmission permission from evaluation metadata (if provided by faculty).
+        allow_resubmission = False
+        if evaluation.data:
+            try:
+                model_evaluation = evaluation.data[0].get("model_evaluation")
+                if isinstance(model_evaluation, str) and model_evaluation.strip().startswith("{"):
+                    parsed = json.loads(model_evaluation)
+                    meta = parsed.get("__meta") if isinstance(parsed, dict) else None
+                    allow_resubmission = bool((meta or {}).get("allow_resubmission"))
+            except Exception:
+                allow_resubmission = False
+
         return {
             "status": "success",
             "submission": submission_data,
-            "evaluation": evaluation.data[0] if evaluation.data else None
+            "evaluation": evaluation.data[0] if evaluation.data else None,
+            "allow_resubmission": allow_resubmission
         }
         
     except HTTPException as he:

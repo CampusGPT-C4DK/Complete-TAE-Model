@@ -96,8 +96,8 @@ def student_dashboard(user: dict = Depends(get_current_user)):
         
         # Calculate statistics
         total_submissions = len(submissions.data)
-        graded_count = sum(1 for s in submissions.data if s["status"] == "graded")
-        pending_count = sum(1 for s in submissions.data if s["status"] != "graded")
+        graded_count = sum(1 for s in submissions.data if s["status"] in ["graded", "passed", "failed"])
+        pending_count = sum(1 for s in submissions.data if s["status"] in ["submitted", "late"])
         late_count = sum(1 for s in submissions.data if s.get("is_late", False))
         
         # Calculate grades if available
@@ -197,7 +197,7 @@ def faculty_dashboard(user: dict = Depends(get_current_user)):
         archived_assignments = sum(1 for a in assignments.data if a["status"] == "archived")
         
         total_submissions = len(submissions.data) if submissions.data else 0
-        graded_submissions = sum(1 for s in submissions.data if s["status"] == "graded") if submissions.data else 0
+        graded_submissions = sum(1 for s in submissions.data if s["status"] in ["graded", "passed", "failed"]) if submissions.data else 0
         pending_submissions = total_submissions - graded_submissions
         late_submissions = sum(1 for s in submissions.data if s.get("is_late", False)) if submissions.data else 0
         
@@ -229,7 +229,7 @@ def faculty_dashboard(user: dict = Depends(get_current_user)):
                 pending = supabase.table("submissions") \
                     .select("id") \
                     .eq("assignment_id", assignment_id) \
-                    .neq("status", "graded") \
+                    .in_("status", ["submitted", "late"]) \
                     .execute()
                 
                 pending_by_assignment[assignment_id] = len(pending.data) if pending.data else 0
@@ -361,4 +361,146 @@ def student_performance(user: dict = Depends(get_current_user)):
         raise
     except Exception as e:
         logger.error(f"❌ Error fetching performance analytics: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+
+# --------------------------------------------------
+# 📊 FACULTY - VIEW ALL STUDENTS' PERFORMANCE
+# --------------------------------------------------
+@router.get("/faculty-students-performance")
+def faculty_students_performance(user: dict = Depends(get_current_user)):
+    """
+    Get comprehensive performance data for all students (for faculty/admin dashboard).
+    Faculty can view performance of all students in their classes.
+    """
+    try:
+        user_info = user
+        faculty_id = user_info["user_id"]
+        
+        # Check if user is faculty
+        if not is_faculty_role(user_info.get("role")):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only faculty can access student performance"
+            )
+        
+        logger.info(f"Fetching student performance for faculty: {faculty_id}")
+        
+        # Get all assignments created by this faculty
+        assignments = supabase.table("assignments") \
+            .select("id") \
+            .eq("faculty_id", faculty_id) \
+            .execute()
+        
+        assignment_ids = [a["id"] for a in assignments.data] if assignments.data else []
+        
+        if not assignment_ids:
+            logger.info("No assignments found for this faculty")
+            return {
+                "status": "success",
+                "students": [],
+                "total_students": 0,
+                "statistics": {
+                    "average_score": 0,
+                    "highest_score": 0,
+                    "lowest_score": 0,
+                    "total_submissions": 0,
+                    "graded_submissions": 0
+                }
+            }
+        
+        # Get all submissions for faculty's assignments
+        submissions = supabase.table("submissions") \
+            .select("id, student_id, created_at, status") \
+            .in_("assignment_id", assignment_ids) \
+            .execute()
+        
+        submission_ids = [s["id"] for s in submissions.data] if submissions.data else []
+        
+        # Get evaluations for these submissions
+        evaluations = []
+        if submission_ids:
+            evaluations = supabase.table("evaluations") \
+                .select("""
+                    id,
+                    submission_id,
+                    marks_obtained,
+                    percentage,
+                    grade,
+                    evaluated_at,
+                    submissions(student_id)
+                """) \
+                .in_("submission_id", submission_ids) \
+                .execute()
+        
+        # Get user info for all students
+        student_ids = list(set([s["student_id"] for s in submissions.data] if submissions.data else []))
+        
+        students_data = {}
+        if student_ids:
+            # Fetch user profiles for display names
+            users = supabase.table("users") \
+                .select("user_id, email, full_name") \
+                .in_("user_id", student_ids) \
+                .execute()
+            
+            for user in users.data if users.data else []:
+                students_data[user["user_id"]] = {
+                    "student_id": user["user_id"],
+                    "email": user["email"],
+                    "full_name": user["full_name"],
+                    "total_marks_obtained": 0,
+                    "total_marks_possible": 0,
+                    "average_percentage": 0,
+                    "submission_count": 0,
+                    "graded_count": 0,
+                    "grades": []
+                }
+        
+        # Process evaluations
+        total_scores = []
+        for eval_data in evaluations.data if evaluations.data else []:
+            submission = eval_data.get("submissions", {})
+            student_id = submission.get("student_id") if submission else None
+            
+            if student_id and student_id in students_data:
+                student = students_data[student_id]
+                
+                if eval_data.get("marks_obtained"):
+                    student["total_marks_obtained"] += eval_data["marks_obtained"]
+                    student["total_marks_possible"] += 100  # Assuming 100 is total
+                    student["graded_count"] += 1
+                    student["grades"].append(eval_data["percentage"])
+                    total_scores.append(eval_data["percentage"])
+        
+        # Calculate averages
+        for student in students_data.values():
+            if student["grades"]:
+                student["average_percentage"] = round(
+                    sum(student["grades"]) / len(student["grades"]), 2
+                )
+            student["submission_count"] = len(student["grades"])
+        
+        # Calculate statistics
+        statistics = {
+            "average_score": round(sum(total_scores) / len(total_scores), 2) if total_scores else 0,
+            "highest_score": max(total_scores) if total_scores else 0,
+            "lowest_score": min(total_scores) if total_scores else 0,
+            "total_submissions": len(submissions.data) if submissions.data else 0,
+            "graded_submissions": len(evaluations.data) if evaluations.data else 0
+        }
+        
+        logger.info(f"✓ Student performance data prepared for {len(students_data)} students")
+        
+        return {
+            "status": "success",
+            "students": list(students_data.values()),
+            "total_students": len(students_data),
+            "statistics": statistics
+        }
+        
+    except HTTPException as he:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error fetching student performance: {str(e)}")
         return {"status": "error", "message": str(e)}

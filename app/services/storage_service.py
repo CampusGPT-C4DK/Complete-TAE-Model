@@ -308,8 +308,10 @@ class StorageService:
         """
         try:
             logger.info(f"🗑️ Deleting from {bucket}: {file_path}")
-            
-            supabase.storage.from_(bucket).remove([file_path])
+
+            # Use service role for deletes when available (private buckets + RLS).
+            storage_client = supabase_admin if supabase_admin else supabase
+            storage_client.storage.from_(bucket).remove([file_path])
             
             logger.info("✓ File deleted")
             return True

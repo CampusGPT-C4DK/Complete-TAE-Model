@@ -1,17 +1,19 @@
-from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, status, Depends
+from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, status, Depends, Request, Body
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer
-from typing import List, Optional
+from typing import List, Optional, Union
 import os
 import logging
 from datetime import datetime
+from io import BytesIO
 
 from app.database import supabase, supabase_admin
 from app.services.auth_service import AuthService
-from app.services.storage_service import StorageService
+from app.services.storage_service import StorageService, ASSIGNMENTS_BUCKET, TEACHER_NOTES_BUCKET, SUBMISSIONS_BUCKET
 from app.services.pdf_processor import extract_text
 from app.services.assignment_generator import generate_questions
 from app.services.assignment_pdf import generate_assignment_pdf
-from app.core.security import verify_jwt_token, is_faculty_role
+from app.core.security import verify_jwt_token, is_faculty_role, is_admin_role
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/teacher", tags=["Teacher"])
@@ -184,12 +186,12 @@ def login_faculty(
             password=password
         )
         
-        # Verify faculty role
-        if result.get("role") != "faculty":
-            logger.warning(f"Non-faculty user attempted faculty login: {email}")
+        # Allow both faculty and admin roles for teacher/faculty access.
+        if not is_faculty_role(result.get("role")):
+            logger.warning(f"Non-faculty/admin user attempted faculty login: {email}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only faculty can login to this endpoint"
+                detail="Only faculty or admin can login to this endpoint"
             )
         
         logger.info(f"✅ Faculty login successful: {email}")
@@ -221,15 +223,16 @@ def login_faculty(
 # --------------------------------------------------
 @router.post("/upload-notes")
 async def upload_notes(
-    files: List[UploadFile] = File(...),
-    difficulty: str = Form(...),
-    assignment_no: str = Form(...),
-    subject: str = Form(...),
-    branch: str = Form(...),
-    semester: str = Form(...),
-    faculty: str = Form(...),
-    given_date: str = Form(...),
-    submission_date: str = Form(...),
+    request: Request,
+    files: Optional[Union[UploadFile, List[UploadFile]]] = File(None),
+    difficulty: Optional[str] = Form(None),
+    assignment_no: Optional[str] = Form(None),
+    subject: Optional[str] = Form(None),
+    branch: Optional[str] = Form(None),
+    semester: Optional[str] = Form(None),
+    faculty: Optional[str] = Form(None),
+    given_date: Optional[str] = Form(None),
+    submission_date: Optional[str] = Form(None),
     faculty_user: dict = Depends(get_current_faculty)
 ):
     """
@@ -237,6 +240,40 @@ async def upload_notes(
     Faculty must be authenticated.
     """
     try:
+        # Be permissive with multipart keys to support older/newer frontend payloads.
+        # This avoids 422 validation failures for minor field-name differences.
+        form_data = await request.form()
+
+        uploaded_files: List[UploadFile] = []
+        if isinstance(files, list):
+            uploaded_files.extend(files)
+        elif files is not None:
+            uploaded_files.append(files)
+
+        if not uploaded_files:
+            uploaded_files.extend(form_data.getlist("files") or form_data.getlist("file"))
+        uploaded_files = [f for f in uploaded_files if hasattr(f, "filename")]
+
+        difficulty = difficulty or form_data.get("difficulty")
+        assignment_no = assignment_no or form_data.get("assignment_no") or form_data.get("assignmentNo")
+        subject = subject or form_data.get("subject")
+        branch = branch or form_data.get("branch")
+        semester = semester or form_data.get("semester")
+        faculty = faculty or form_data.get("faculty") or faculty_user.get("full_name") or "Faculty"
+        given_date = given_date or form_data.get("given_date") or form_data.get("givenDate")
+        submission_date = submission_date or form_data.get("submission_date") or form_data.get("submissionDate")
+
+        if not uploaded_files:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No files received. Please select at least one PDF file."
+            )
+        if not all([difficulty, assignment_no, subject, branch, semester, given_date, submission_date]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing required fields. Required: difficulty, assignment_no, subject, branch, semester, given_date, submission_date."
+            )
+
         # Get user_id from verified faculty user
         user_id = faculty_user["user_id"]
         
@@ -253,7 +290,7 @@ async def upload_notes(
         unit_notes = {}
         storage_urls = {}
         
-        for i, file in enumerate(files):
+        for i, file in enumerate(uploaded_files):
             file_path = f"teacher_uploads/{file.filename}"
             
             logger.info(f"   Processing file {i+1}: {file.filename}")
@@ -363,7 +400,7 @@ async def upload_notes(
             )
         
         # Clean up local files
-        for file in files:
+        for file in uploaded_files:
             file_path = f"teacher_uploads/{file.filename}"
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -407,6 +444,17 @@ def get_my_assignments(faculty_user: dict = Depends(get_current_faculty)):
         
         logger.info(f"✓ Found {len(data.data)} assignments")
         
+        # Add download URLs for each assignment
+        for assignment in data.data:
+            assignment["download_url"] = f"/teacher/download-assignment/{assignment['id']}"
+            
+            # Process teacher notes URLs
+            teacher_notes_urls = assignment.get("teacher_notes_urls") or {}
+            if isinstance(teacher_notes_urls, dict):
+                for subject_key in teacher_notes_urls.keys():
+                    teacher_notes_urls[subject_key] = f"/teacher/download-teacher-notes/{assignment['id']}/{subject_key}"
+                assignment["teacher_notes_urls"] = teacher_notes_urls
+        
         return {"status": "success", "count": len(data.data), "data": data.data}
         
     except HTTPException as he:
@@ -429,25 +477,23 @@ def track_submissions(
         
         logger.info(f"Fetching submissions for assignment: {assignment_id}")
         
-        # Fetch evaluations with submission details
-        data = supabase.table("evaluations") \
+        # Fetch submission records first so status is always visible, even before/without evaluation.
+        submission_rows = supabase.table("submissions") \
             .select("""
                 id,
-                total_marks,
-                marks_obtained,
-                percentage,
-                grade,
-                feedback,
-                evaluated_at,
-                submissions(student_id, submitted_at, is_late, days_late, status)
+                student_id,
+                submitted_at,
+                is_late,
+                days_late,
+                status
             """) \
             .eq("assignment_id", assignment_id) \
+            .order("submitted_at", desc=True) \
             .execute()
         
         formatted = []
-        for row in data.data:
-            submission = row.get("submissions", {})
-            student_id = submission.get("student_id") if submission else None
+        for submission in submission_rows.data:
+            student_id = submission.get("student_id")
             
             # Get student profile (if we need full_name and email)
             student_info = {}
@@ -462,20 +508,33 @@ def track_submissions(
                         student_info = student_data.data
                 except Exception as e:
                     logger.warning(f"Could not fetch student profile for {student_id}: {str(e)}")
+
+            # Get evaluation data if graded/evaluated
+            evaluation_data = {}
+            try:
+                eval_result = supabase.table("evaluations") \
+                    .select("total_marks, marks_obtained, percentage, grade, feedback, evaluated_at") \
+                    .eq("submission_id", submission.get("id")) \
+                    .limit(1) \
+                    .execute()
+                if eval_result.data:
+                    evaluation_data = eval_result.data[0]
+            except Exception as e:
+                logger.warning(f"Could not fetch evaluation for submission {submission.get('id')}: {str(e)}")
             
             formatted.append({
                 "student_id": student_id,
                 "student_name": student_info.get("full_name", "N/A"),
                 "email": student_info.get("email", "N/A"),
-                "marks": row.get("marks_obtained"),
-                "total_marks": row.get("total_marks"),
-                "percentage": row.get("percentage"),
-                "grade": row.get("grade"),
-                "feedback": row.get("feedback"),
-                "late_days": submission.get("days_late") if submission else 0,
-                "status": submission.get("status") if submission else "pending",
-                "submitted_at": submission.get("submitted_at") if submission else None,
-                "evaluated_at": row.get("evaluated_at")
+                "marks": evaluation_data.get("marks_obtained"),
+                "total_marks": evaluation_data.get("total_marks"),
+                "percentage": evaluation_data.get("percentage"),
+                "grade": evaluation_data.get("grade"),
+                "feedback": evaluation_data.get("feedback"),
+                "late_days": submission.get("days_late", 0),
+                "status": submission.get("status", "pending"),
+                "submitted_at": submission.get("submitted_at"),
+                "evaluated_at": evaluation_data.get("evaluated_at")
             })
         
         logger.info(f"✓ Found {len(formatted)} submissions")
@@ -487,3 +546,294 @@ def track_submissions(
     except Exception as e:
         logger.error(f"❌ Error fetching submissions: {str(e)}")
         return {"status": "error", "message": str(e)}
+
+
+# --------------------------------------------------
+# 🗑️ DELETE ASSIGNMENT (DB + STORAGE)
+# --------------------------------------------------
+@router.delete("/assignments/{assignment_id}")
+def delete_assignment(
+    assignment_id: str,
+    faculty_user: dict = Depends(get_current_faculty)
+):
+    """
+    Delete an assignment created by the faculty (or admin).
+    - Removes assignment row (cascades to submissions/evaluations via FK constraints)
+    - Best-effort deletes related storage objects (pdf + notes + submission files)
+    """
+    try:
+        db_client = supabase_admin if supabase_admin else supabase
+        requester_id = faculty_user.get("user_id")
+        requester_role = faculty_user.get("role", "")
+
+        # Fetch assignment to validate ownership and get storage paths
+        assignment_res = db_client.table("assignments") \
+            .select("id, faculty_id, pdf_storage_path, teacher_notes_urls") \
+            .eq("id", assignment_id) \
+            .limit(1) \
+            .execute()
+
+        if not assignment_res.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+
+        assignment = assignment_res.data[0]
+        owner_id = assignment.get("faculty_id")
+
+        # Only owner faculty or admin can delete
+        if owner_id != requester_id and not is_admin_role(requester_role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to delete this assignment")
+
+        # Best-effort: delete submission files (if any) from storage
+        try:
+            subs_res = db_client.table("submissions") \
+                .select("submitted_file_path") \
+                .eq("assignment_id", assignment_id) \
+                .execute()
+            for row in (subs_res.data or []):
+                p = row.get("submitted_file_path")
+                if p:
+                    try:
+                        StorageService.delete_file(SUBMISSIONS_BUCKET, p)
+                    except Exception as e:
+                        logger.warning(f"Could not delete submission file {p}: {str(e)}")
+        except Exception as e:
+            logger.warning(f"Could not list submission files for deletion: {str(e)}")
+
+        # Best-effort: delete assignment PDF
+        pdf_path = assignment.get("pdf_storage_path")
+        if pdf_path:
+            try:
+                StorageService.delete_file(ASSIGNMENTS_BUCKET, pdf_path)
+            except Exception as e:
+                logger.warning(f"Could not delete assignment PDF {pdf_path}: {str(e)}")
+
+        # Best-effort: delete teacher notes (URLs stored as public URLs; derive paths)
+        teacher_notes_urls = assignment.get("teacher_notes_urls") or {}
+        if isinstance(teacher_notes_urls, dict):
+            for _, url in teacher_notes_urls.items():
+                try:
+                    if not isinstance(url, str) or f"/{TEACHER_NOTES_BUCKET}/" not in url:
+                        continue
+                    storage_path = url.split(f"/{TEACHER_NOTES_BUCKET}/", 1)[1].split("?", 1)[0]
+                    StorageService.delete_file(TEACHER_NOTES_BUCKET, storage_path)
+                except Exception as e:
+                    logger.warning(f"Could not delete teacher note from url {url}: {str(e)}")
+
+        # Delete the assignment row (cascades)
+        db_client.table("assignments").delete().eq("id", assignment_id).execute()
+
+        return {"status": "success", "message": "Assignment deleted", "assignment_id": assignment_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting assignment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+# --------------------------------------------------
+# ✏️ GET/UPDATE ASSIGNMENT (EDIT FLOW)
+# --------------------------------------------------
+@router.get("/assignments/{assignment_id}")
+def get_assignment_by_id(
+    assignment_id: str,
+    faculty_user: dict = Depends(get_current_faculty)
+):
+    """Fetch a single assignment for editing (owner faculty or admin)."""
+    try:
+        db_client = supabase_admin if supabase_admin else supabase
+        requester_id = faculty_user.get("user_id")
+        requester_role = faculty_user.get("role", "")
+
+        res = db_client.table("assignments").select("*").eq("id", assignment_id).limit(1).execute()
+        if not res.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+
+        assignment = res.data[0]
+        owner_id = assignment.get("faculty_id")
+        if owner_id != requester_id and not is_admin_role(requester_role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to view this assignment")
+
+        # Add download URL for private bucket access
+        assignment["download_url"] = f"/teacher/download-assignment/{assignment_id}"
+        
+        # Process teacher notes URLs
+        teacher_notes_urls = assignment.get("teacher_notes_urls") or {}
+        if isinstance(teacher_notes_urls, dict):
+            for subject_key in teacher_notes_urls.keys():
+                # Replace with backend download endpoints instead of direct Supabase URLs
+                teacher_notes_urls[subject_key] = f"/teacher/download-teacher-notes/{assignment_id}/{subject_key}"
+            assignment["teacher_notes_urls"] = teacher_notes_urls
+
+        return {"status": "success", "data": assignment}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error fetching assignment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.patch("/assignments/{assignment_id}")
+def update_assignment(
+    assignment_id: str,
+    payload: dict = Body(default={}),
+    faculty_user: dict = Depends(get_current_faculty)
+):
+    """
+    Update assignment fields.
+    Supports deactivation by setting status to 'archived' (UI shows Closed).
+    """
+    try:
+        db_client = supabase_admin if supabase_admin else supabase
+        requester_id = faculty_user.get("user_id")
+        requester_role = faculty_user.get("role", "")
+
+        res = db_client.table("assignments").select("faculty_id").eq("id", assignment_id).limit(1).execute()
+        if not res.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+
+        owner_id = res.data[0].get("faculty_id")
+        if owner_id != requester_id and not is_admin_role(requester_role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to edit this assignment")
+
+        allowed = {
+            "assignment_no",
+            "subject",
+            "branch",
+            "semester",
+            "difficulty",
+            "given_date",
+            "submission_date",
+            "status",
+            "created_by",
+        }
+        update_data = {k: v for k, v in (payload or {}).items() if k in allowed}
+        if not update_data:
+            return {"status": "success", "message": "Nothing to update"}
+
+        db_client.table("assignments").update(update_data).eq("id", assignment_id).execute()
+        return {"status": "success", "message": "Assignment updated", "assignment_id": assignment_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error updating assignment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+# ============================================================================
+# 📥 DOWNLOAD ENDPOINTS (for private buckets)
+# ============================================================================
+
+@router.get("/download-assignment/{assignment_id}")
+def download_assignment_pdf(
+    assignment_id: str,
+    faculty_user: dict = Depends(get_current_faculty)
+):
+    """
+    Download assignment PDF from private bucket.
+    Works for both faculty (owner) and admin.
+    """
+    try:
+        db_client = supabase_admin if supabase_admin else supabase
+        requester_id = faculty_user.get("user_id")
+        requester_role = faculty_user.get("role", "")
+
+        # Fetch assignment
+        res = db_client.table("assignments").select("*").eq("id", assignment_id).limit(1).execute()
+        if not res.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+
+        assignment = res.data[0]
+        owner_id = assignment.get("faculty_id")
+        
+        # Check permission (owner or admin)
+        if owner_id != requester_id and not is_admin_role(requester_role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to download this assignment")
+
+        pdf_path = assignment.get("pdf_storage_path")
+        if not pdf_path:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment PDF not found")
+
+        # Download from private bucket
+        logger.info(f"📥 Downloading assignment: {pdf_path}")
+        file_content = StorageService.download_file(ASSIGNMENTS_BUCKET, pdf_path)
+
+        # Extract filename from path
+        filename = os.path.basename(pdf_path)
+
+        # Return as streaming response
+        return StreamingResponse(
+            iter([file_content]),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Download assignment failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get("/download-teacher-notes/{assignment_id}/{subject_key}")
+def download_teacher_notes(
+    assignment_id: str,
+    subject_key: str,
+    faculty_user: dict = Depends(get_current_faculty)
+):
+    """
+    Download teacher notes from private bucket.
+    subject_key is used to identify which note file to download (e.g., 'No SQL')
+    """
+    try:
+        db_client = supabase_admin if supabase_admin else supabase
+        requester_id = faculty_user.get("user_id")
+        requester_role = faculty_user.get("role", "")
+
+        # Fetch assignment
+        res = db_client.table("assignments").select("*").eq("id", assignment_id).limit(1).execute()
+        if not res.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+
+        assignment = res.data[0]
+        owner_id = assignment.get("faculty_id")
+        
+        # Check permission
+        if owner_id != requester_id and not is_admin_role(requester_role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to download these notes")
+
+        teacher_notes_urls = assignment.get("teacher_notes_urls") or {}
+        
+        # Get URL for this subject
+        if not isinstance(teacher_notes_urls, dict) or subject_key not in teacher_notes_urls:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Teacher notes for '{subject_key}' not found")
+
+        file_url = teacher_notes_urls[subject_key]
+        
+        # Extract storage path from URL
+        if f"/{TEACHER_NOTES_BUCKET}/" not in file_url:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file URL")
+
+        storage_path = file_url.split(f"/{TEACHER_NOTES_BUCKET}/", 1)[1].split("?", 1)[0]
+
+        # Download from private bucket
+        logger.info(f"📥 Downloading teacher notes: {storage_path}")
+        file_content = StorageService.download_file(TEACHER_NOTES_BUCKET, storage_path)
+
+        # Extract filename
+        filename = os.path.basename(storage_path)
+
+        # Return as streaming response
+        return StreamingResponse(
+            iter([file_content]),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Download teacher notes failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

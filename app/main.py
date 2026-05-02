@@ -1,5 +1,6 @@
 import logging
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.routes import teacher, student, evaluation, dashboard
 from app.core.config import settings
 
@@ -14,6 +15,17 @@ logger.info(f"Service Role Key configured: {'✓' if settings.SUPABASE_SERVICE_K
 logger.info(f"JWT Secret configured: {'✓' if settings.SUPABASE_JWT_SECRET else '✗'}")
 
 app = FastAPI(title="EduGenAI")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(teacher.router)
 app.include_router(student.router)

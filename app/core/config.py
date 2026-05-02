@@ -48,7 +48,10 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = Field(default="phi3:mini")
 
     # Google Gemini Configuration
-    GEMINI_API_KEY: Optional[str] = Field(default=None, description="Google Gemini API key")
+    GEMINI_API_KEY: Optional[str] = Field(default=None, description="Google Gemini API key (Primary)")
+    GEMINI_API_KEY_2: Optional[str] = Field(default=None, description="Google Gemini API key (Backup 1)")
+    GEMINI_API_KEY_3: Optional[str] = Field(default=None, description="Google Gemini API key (Backup 2)")
+    GEMINI_API_KEY_4: Optional[str] = Field(default=None, description="Google Gemini API key (Backup 3)")
     GEMINI_MODEL: str = Field(default="gemini-2.0-flash", description="Gemini model version")
 
     # Mistral Configuration
@@ -105,6 +108,22 @@ class Settings(BaseSettings):
             )
         
         logger.info(f"✅ LLM provider: {'phi3:mini' if self.USE_PHI3_MINI else 'Gemini' if self.USE_GEMINI else 'Mistral'}")
+
+    def get_gemini_api_keys(self) -> list:
+        """
+        Get all configured Gemini API keys in order (primary, backup 1, 2, 3).
+        
+        Returns:
+            list: List of available API keys (filters out None values)
+        """
+        keys = [
+            self.GEMINI_API_KEY,
+            self.GEMINI_API_KEY_2,
+            self.GEMINI_API_KEY_3,
+            self.GEMINI_API_KEY_4,
+        ]
+        # Return only non-None keys
+        return [key for key in keys if key]
 
 
 # Global settings instance
